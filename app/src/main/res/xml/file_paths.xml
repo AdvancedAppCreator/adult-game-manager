@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <external-files-path name="updates" path="updates/" />
+    <cache-path name="cache" path="." />
+    <!-- All of primary external storage, so we can serve files at /sdcard/... via
+         FileProvider to JoiPlay (intents can't carry file:// URIs since Android 7). -->
+    <external-path name="external_root" path="." />
+</paths>

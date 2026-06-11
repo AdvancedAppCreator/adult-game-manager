@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="com.advancedappcreator.f95updater.permission.MIGRATION" />
+
+    <queries>
+        <package android:name="cyou.joiplay.joiplay" />
+        <package android:name="com.advancedappcreator.f95updater" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- JoiPlay runtime actions. Needed so resolveActivity()/startActivity()
+             can see plugin APKs (renpy, rpgmaker, godot, ruffle) on Android 11+. -->
+        <intent><action android:name="cyou.joiplay.runtime.rpgmmv.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.rpgmmz.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.rpgmxp.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.rpgmvx.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.rpgmvxa.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.renpy.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.construct.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.twine.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.html.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.electron.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.tyrano.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.godot3.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.godot4.run" /></intent>
+        <intent><action android:name="cyou.joiplay.runtime.ruffle.run" /></intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:largeHeap="true"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AdultGameManager"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

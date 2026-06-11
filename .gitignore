@@ -1,0 +1,21 @@
+.gradle/
+build/
+app/build/
+app/.cxx/
+
+# Local release signing material. Never commit these.
+app/keystore.properties
+app/*.keystore
+app/*.jks
+
+# Local/private runtime config and generated artifacts.
+app_config.json
+*.log
+*.apk
+*.apks
+*.aab
+
+# IDE/local files.
+.idea/
+*.iml
+local.properties
