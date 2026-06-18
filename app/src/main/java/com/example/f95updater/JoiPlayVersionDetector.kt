@@ -22,6 +22,7 @@ data class VersionCandidate(val source: String, val version: String, val detail:
  * Also includes JoiPlay's user-set `version` field if present in games.json.
  */
 object JoiPlayVersionDetector {
+    const val INSTALL_MARKER_FILE = ".agm-install.json"
 
     suspend fun detect(context: Context, app: InstalledApp): List<VersionCandidate> = coroutineScope {
         if (app.source != AppSource.JoiPlay) return@coroutineScope emptyList()
@@ -30,6 +31,11 @@ object JoiPlayVersionDetector {
         val gameId = app.joiPlayGameId ?: ""
 
         // Run all detectors in parallel.
+        val markerDef = async(Dispatchers.IO) {
+            runCatching { detectFromInstallMarker(context, app) }
+                .onFailure { AppLog.w("JoiPlayDetect", "Install marker probe failed for $title", it) }
+                .getOrNull()
+        }
         val regexDef = async(Dispatchers.Default) { detectFromRegex(title, folderName, app.storagePath) }
         val metaDef = async(Dispatchers.IO) {
             val v = JoiPlayMetadataCatalog.lookupVersion(context, title) ?: return@async null
@@ -48,6 +54,7 @@ object JoiPlayVersionDetector {
         }
 
         val out = mutableListOf<VersionCandidate>()
+        markerDef.await()?.let { out.add(it) }
         backupDef?.let { out.add(it) }
         regexDef.await()?.let { out.add(it) }
         metaDef.await()?.let { out.add(it) }
@@ -87,7 +94,7 @@ object JoiPlayVersionDetector {
         RegexOption.IGNORE_CASE
     )
 
-    private fun extractVersion(s: String): String? {
+    fun extractVersion(s: String): String? {
         for (re in versionPatterns) {
             val m = re.find(s) ?: continue
             val hasV = m.groupValues[1].isNotBlank()
@@ -104,16 +111,35 @@ object JoiPlayVersionDetector {
         return null
     }
 
+    fun extractVersionFromArchiveName(name: String): String? {
+        val lower = name.lowercase()
+        val withoutArchiveExt = listOf(".zip", ".rar", ".7z", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
+            .firstOrNull { lower.endsWith(it) }
+            ?.let { name.dropLast(it.length) }
+            ?: name.substringBeforeLast('.', name)
+        return extractVersion(withoutArchiveExt)
+    }
+
     // -----------------------------------------------------------------------
     // Method 3: SAF probe â€” read engine-specific files inside the game folder.
     // -----------------------------------------------------------------------
-    private suspend fun detectFromSaf(context: Context, app: InstalledApp): VersionCandidate? {
-        val folderName = app.storageFolderName ?: return null
-        val type = app.joiPlayType?.lowercase() ?: return null
+    private suspend fun detectFromInstallMarker(context: Context, app: InstalledApp): VersionCandidate? {
+        val gameDir = findGameDir(context, app) ?: return null
+        val marker = gameDir.findFile(INSTALL_MARKER_FILE) ?: return null
+        val text = readText(context, marker, maxBytes = 16 * 1024) ?: return null
+        val json = runCatching { JSONObject(text) }.getOrNull() ?: return null
+        if (json.optInt("schemaVersion", 0) != 1) return null
+        val version = json.optString("detectedVersion", "").trim().ifBlank { null }
+            ?: json.optString("sourceArchive", "").trim().let { extractVersionFromArchiveName(it) }
+            ?: return null
+        val archive = json.optString("sourceArchive", "").trim()
+        val detail = if (archive.isNotBlank()) "Recorded by AGM upgrade from $archive" else "Recorded by AGM upgrade"
+        return VersionCandidate("From AGM install marker", version, detail)
+    }
 
-        val rootUri = JoiPlayScanner.getRootUri(context) ?: return null
-        val root = runCatching { DocumentFile.fromTreeUri(context, rootUri) }.getOrNull() ?: return null
-        val gameDir = root.findFile(folderName) ?: return null
+    private suspend fun detectFromSaf(context: Context, app: InstalledApp): VersionCandidate? {
+        val type = app.joiPlayType?.lowercase() ?: return null
+        val gameDir = findGameDir(context, app) ?: return null
 
         return when (type) {
             "renpy", "legacyrenpy" -> probeRenPy(context, gameDir)
@@ -124,9 +150,29 @@ object JoiPlayVersionDetector {
         }
     }
 
-    /** Ren'Py: look for `define config.version = "X"` in game/options.rpy or game/script.rpy. */
+    private suspend fun findGameDir(context: Context, app: InstalledApp): DocumentFile? {
+        val folderName = app.storageFolderName ?: return null
+        val rootUri = JoiPlayScanner.getRootUri(context) ?: return null
+        val root = runCatching { DocumentFile.fromTreeUri(context, rootUri) }.getOrNull() ?: return null
+        return root.findFile(folderName)
+    }
+
+    /** Ren'Py: prefer build_info.json, then look for `define config.version = "X"` in source files. */
     private suspend fun probeRenPy(context: Context, gameDir: DocumentFile): VersionCandidate? {
         val gameSub = gameDir.findFile("game") ?: return null
+        gameSub.findFile("cache")
+            ?.findFile("build_info.json")
+            ?.let { buildInfo ->
+                val text = readText(context, buildInfo, maxBytes = 128 * 1024)
+                val version = text?.let {
+                    runCatching { JSONObject(it).optString("version", "").trim() }
+                        .getOrNull()
+                        ?.takeIf { value -> value.isNotBlank() }
+                }
+                if (version != null) {
+                    return VersionCandidate("From game files", version, "Found in game/cache/build_info.json")
+                }
+            }
         val candidates = listOf("options.rpy", "options.rpyc", "script.rpy")
         // Regex matches:  define config.version = "1.2.3"   /   define gui.about = "Version 1.2"
         val versionRe = Regex("""define\s+config\.version\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)

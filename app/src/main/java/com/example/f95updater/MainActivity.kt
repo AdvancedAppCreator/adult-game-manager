@@ -54,6 +54,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import org.json.JSONObject
+import org.jsoup.parser.Parser
+import java.io.File
 import java.text.DateFormat
 import java.util.Date
 
@@ -133,16 +136,102 @@ fun catalogMatchLabels(app: InstalledApp): List<String> {
     val parent = path?.substringBeforeLast('/', missingDelimiterValue = "")
         ?.substringAfterLast('/')
         ?.takeIf { it.isNotBlank() }
-    return listOfNotNull(
-        app.label,
-        app.launcherLabel,
+    val labels = mutableListOf<String>()
+    labels += listOfNotNull(app.label, app.launcherLabel)
+    labels += joiplayInternalTitleLabels(app)
+    labels += listOfNotNull(
         app.storageFolderName,
         basename,
         parent?.takeIf { basename in setOf("www", "game", "app", "src", "resources") },
-    ).map { it.trim() }.filter { it.isNotBlank() }.distinct()
+    )
+    return labels.map { it.trim() }.filter { it.isNotBlank() }.distinct()
 }
 
 private val JOIPLAY_WRAPPER_FOLDERS = setOf("www", "game", "app", "src", "resources")
+
+private fun joiplayInternalTitleLabels(app: InstalledApp): List<String> {
+    if (app.source != AppSource.JoiPlay) return emptyList()
+    val root = app.storagePath?.let { File(it) }?.takeIf { it.isDirectory } ?: return emptyList()
+    val roots = buildList {
+        add(root)
+        val directHasGame = File(root, "game").isDirectory || File(root, "www").isDirectory || File(root, "data").isDirectory
+        if (!directHasGame) {
+            root.listFiles()
+                ?.asSequence()
+                ?.filter { it.isDirectory }
+                ?.take(8)
+                ?.forEach { add(it) }
+        }
+    }
+    val out = linkedSetOf<String>()
+    for (candidateRoot in roots) {
+        readRenPyBuildInfoTitle(candidateRoot)?.let { out += it }
+        readRenPyOptionsTitle(candidateRoot)?.let { out += it }
+        readRpgmSystemTitle(candidateRoot)?.let { out += it }
+        readHtmlTitle(candidateRoot)?.let { out += it }
+    }
+    return out.toList().take(8)
+}
+
+private fun readRenPyBuildInfoTitle(root: File): String? {
+    val file = File(root, "game/cache/build_info.json")
+    val text = readSmallTextFile(file, maxBytes = 128 * 1024) ?: return null
+    return runCatching {
+        JSONObject(text).optString("name", "")
+            .takeIf { it.isNotBlank() }
+            ?.let { cleanCatalogMetadataTitle(it) }
+    }.getOrNull()
+}
+
+private fun readRenPyOptionsTitle(root: File): String? {
+    val text = readSmallTextFile(File(root, "game/options.rpy"), maxBytes = 128 * 1024)
+        ?: readSmallTextFile(File(root, "game/gui/about.rpy"), maxBytes = 128 * 1024)
+        ?: return null
+    return Regex("""(?:define\s+)?config\.name\s*=\s*(?:_\()?["'](.+?)["']""")
+        .find(text)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.let { cleanCatalogMetadataTitle(it) }
+}
+
+private fun readRpgmSystemTitle(root: File): String? {
+    val file = listOf(
+        File(root, "www/data/System.json"),
+        File(root, "data/System.json"),
+    ).firstOrNull { it.isFile } ?: return null
+    val text = readSmallTextFile(file, maxBytes = 128 * 1024) ?: return null
+    return runCatching {
+        JSONObject(text).optString("gameTitle", "")
+            .takeIf { it.isNotBlank() }
+            ?.let { cleanCatalogMetadataTitle(it) }
+    }.getOrNull()
+}
+
+private fun readHtmlTitle(root: File): String? {
+    val file = listOf(File(root, "www/index.html"), File(root, "index.html")).firstOrNull { it.isFile } ?: return null
+    val text = readSmallTextFile(file, maxBytes = 128 * 1024) ?: return null
+    return Regex("""(?is)<title[^>]*>(.*?)</title>""")
+        .find(text)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.replace(Regex("""\s+"""), " ")
+        ?.let { cleanCatalogMetadataTitle(it) }
+}
+
+private fun readSmallTextFile(file: File, maxBytes: Int): String? {
+    if (!file.isFile || file.length() <= 0L || file.length() > maxBytes) return null
+    return runCatching { file.readText(Charsets.UTF_8) }.getOrNull()
+}
+
+private fun cleanCatalogMetadataTitle(value: String): String? {
+    val cleaned = Parser.unescapeEntities(value, false).trim().take(160)
+    if (cleaned.isBlank()) return null
+    val normalized = CatalogRepository.normalizeTitle(cleaned)
+    if (normalized.length < 3) return null
+    if (normalized in setOf("game", "joiplay", "www", "index", "rmmzgame", "rmmvgame", "rpgmgame", "nwjs")) return null
+    if (normalized.all { it.isDigit() }) return null
+    return cleaned.takeIf { normalized.any { ch -> ch.isLetter() } }
+}
 
 internal fun joiPlaySizeKey(app: InstalledApp): String? {
     if (app.source != AppSource.JoiPlay) return null
@@ -631,6 +720,7 @@ fun InstalledScreen(
     var supportDialogOpen by remember { mutableStateOf(false) }
     var topStatusOpen by remember { mutableStateOf(false) }
     var diagnosticsSummaryOpen by remember { mutableStateOf(false) }
+    var matchResearchProgress by remember { mutableStateOf<MatchResearchProgress?>(null) }
     var permissionRationale by remember { mutableStateOf<PermissionRationale?>(null) }
     var installWarningOpen by remember { mutableStateOf(false) }
     var joiplaySettingsOpen by remember { mutableStateOf(false) }
@@ -2910,6 +3000,48 @@ fun InstalledScreen(
                                 if (appConfig.diagnosticsEnabled) {
                                     HorizontalDivider()
                                     DropdownMenuItem(
+                                        text = { Text(if (matchResearchProgress != null) "Uploading match research..." else "Upload match research snapshot") },
+                                        leadingIcon = {
+                                            if (matchResearchProgress != null) {
+                                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                            } else {
+                                                Icon(Icons.Default.CloudUpload, null)
+                                            }
+                                        },
+                                        enabled = matchResearchProgress == null,
+                                        onClick = {
+                                            menuOpen = false; subLogsOpen = false
+                                            scope.launch {
+                                                AppLog.i("MatchResearch", "Snapshot upload requested")
+                                                matchResearchProgress = MatchResearchProgress("Starting")
+                                                val result = runCatching {
+                                                    MatchResearchCollector.collectSaveUpload(
+                                                        context = context.applicationContext,
+                                                        repo = repo,
+                                                        catalog = catalog,
+                                                    ) { progress ->
+                                                        matchResearchProgress = progress
+                                                    }
+                                                }
+                                                matchResearchProgress = null
+                                                result.onSuccess { upload ->
+                                                    snackbarMsg = if (upload.uploaded) {
+                                                        "Uploaded match snapshot: ${upload.blobName}"
+                                                    } else {
+                                                        "Snapshot saved locally; upload failed: ${upload.error}"
+                                                    }
+                                                    AppLog.i(
+                                                        "MatchResearch",
+                                                        "Snapshot result uploaded=${upload.uploaded} local=${upload.localFile.absolutePath} blob=${upload.blobName} err=${upload.error}"
+                                                    )
+                                                }.onFailure {
+                                                    AppLog.e("MatchResearch", "Snapshot failed", it)
+                                                    snackbarMsg = "Match snapshot failed: ${it.message}"
+                                                }
+                                            }
+                                        }
+                                    )
+                                    DropdownMenuItem(
                                         text = { Text(if (launchScreenshotRunning) "Capturing launch screenshots..." else "Capture launch screenshots") },
                                         leadingIcon = {
                                             if (launchScreenshotRunning) {
@@ -4124,6 +4256,10 @@ fun InstalledScreen(
             },
             confirmButton = {}
         )
+    }
+
+    matchResearchProgress?.let { progress ->
+        MatchResearchProgressDialog(progress = progress)
     }
 
     // Progress dialog shown while running JoiPlay version detection.
@@ -5978,6 +6114,46 @@ private fun DetailRowWithAction(
 }
 
 @Composable
+private fun MatchResearchProgressDialog(progress: MatchResearchProgress) {
+    AlertDialog(
+        onDismissRequest = {},
+        title = { Text("Uploading match research snapshot") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(progress.stage)
+                }
+                if (progress.total > 0) {
+                    LinearProgressIndicator(
+                        progress = { (progress.current.toFloat() / progress.total.toFloat()).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "${progress.current} / ${progress.total}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                if (!progress.detail.isNullOrBlank()) {
+                    Text(
+                        progress.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+    )
+}
+
+@Composable
 private fun JoiPlayUnusedFolderProgressDialog(
     progress: JoiPlayUnusedFolderReporter.Progress?,
 ) {
@@ -6912,10 +7088,14 @@ private fun RpgmSaveSlotDetailDialog(
     var restorePickerOpen by remember { mutableStateOf(false) }
     var restoreTarget by remember { mutableStateOf<RenPySaveBackup?>(null) }
     var valueFilter by remember { mutableStateOf("") }
+    var wholeWordFilter by remember { mutableStateOf(false) }
     var typeFilter by remember { mutableStateOf<String?>(null) }
+    var syncTarget by remember(slot.filePath) { mutableStateOf<SaveSyncMirrorTarget?>(null) }
+    var overwriteSyncToo by remember(slot.filePath) { mutableStateOf(false) }
     LaunchedEffect(slot.filePath) {
         inspection = withContext(Dispatchers.IO) { RpgmSaveEditor.inspect(slot) }
         backups = withContext(Dispatchers.IO) { RpgmSaveEditor.listBackups(slot) }
+        syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -6941,6 +7121,30 @@ private fun RpgmSaveSlotDetailDialog(
                         overflow = TextOverflow.Ellipsis,
                     )
                     editMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                    syncTarget?.let { target ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !editing) { overwriteSyncToo = !overwriteSyncToo },
+                        ) {
+                            Checkbox(
+                                checked = overwriteSyncToo,
+                                enabled = !editing,
+                                onCheckedChange = { overwriteSyncToo = it },
+                            )
+                            Column {
+                                Text("Overwrite sync too", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${target.fileName} • ${fmtDateTime(target.modifiedAt)} • ${fmtSize(target.sizeBytes)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
                     if (backups.isNotEmpty()) {
                         TextButton(enabled = !editing, onClick = { restorePickerOpen = true }) {
                             Text("Restore backup… (${backups.size})")
@@ -6960,10 +7164,11 @@ private fun RpgmSaveSlotDetailDialog(
                     val q = valueFilter.trim()
                     val values = loaded.values.filter { value ->
                         (typeFilter == null || value.type == typeFilter) &&
-                            (q.isBlank() ||
-                                value.path.contains(q, ignoreCase = true) ||
-                                value.displayValue.contains(q, ignoreCase = true) ||
-                                value.type.contains(q, ignoreCase = true))
+                            SaveSearchMatcher.matchesAny(
+                                query = q,
+                                wholeWord = wholeWordFilter,
+                                fields = listOf(value.path, value.displayValue, value.type),
+                            )
                     }
                     val filterControls: @Composable ColumnScope.() -> Unit = {
                         if (wideEditor) {
@@ -6976,6 +7181,30 @@ private fun RpgmSaveSlotDetailDialog(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             editMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary) }
+                            syncTarget?.let { target ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !editing) { overwriteSyncToo = !overwriteSyncToo },
+                                ) {
+                                    Checkbox(
+                                        checked = overwriteSyncToo,
+                                        enabled = !editing,
+                                        onCheckedChange = { overwriteSyncToo = it },
+                                    )
+                                    Column {
+                                        Text("Overwrite sync too", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "${target.fileName} • ${fmtDateTime(target.modifiedAt)} • ${fmtSize(target.sizeBytes)}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
                             if (backups.isNotEmpty()) {
                                 TextButton(enabled = !editing, onClick = { restorePickerOpen = true }) {
                                     Text("Restore backup… (${backups.size})")
@@ -7003,6 +7232,11 @@ private fun RpgmSaveSlotDetailDialog(
                                 .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            FilterChip(
+                                selected = wholeWordFilter,
+                                onClick = { wholeWordFilter = !wholeWordFilter },
+                                label = { Text("Whole word", fontSize = 12.sp) },
+                            )
                             listOf(null, "int", "float", "bool", "string").forEach { type ->
                                 FilterChip(
                                     selected = typeFilter == type,
@@ -7089,8 +7323,15 @@ private fun RpgmSaveSlotDetailDialog(
                     sessionBackup = backup
                     editMessage = result.message
                     if (result.ok) {
+                        if (overwriteSyncToo) {
+                            syncTarget?.let { target ->
+                                val syncResult = SaveSyncMirror.overwriteSyncTarget(slot.filePath, target)
+                                editMessage = "${result.message} ${syncResult.message}"
+                            }
+                        }
                         inspection = withContext(Dispatchers.IO) { RpgmSaveEditor.inspect(slot) }
                         backups = withContext(Dispatchers.IO) { RpgmSaveEditor.listBackups(slot) }
+                        syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
                         editTarget = null
                     }
                     editing = false
@@ -7742,13 +7983,17 @@ private fun RenPySaveSlotDetailDialog(
     var editMessage by remember { mutableStateOf<String?>(null) }
     var sessionBackup by remember(slot.filePath) { mutableStateOf<SaveEditSessionBackup?>(null) }
     var variableFilter by remember { mutableStateOf("") }
+    var wholeWordFilter by remember { mutableStateOf(false) }
     var variableTypeFilter by remember { mutableStateOf<String?>(null) }
     var backups by remember(slot.filePath) { mutableStateOf<List<RenPySaveBackup>>(emptyList()) }
     var restorePickerOpen by remember { mutableStateOf(false) }
     var restoreTarget by remember { mutableStateOf<RenPySaveBackup?>(null) }
+    var syncTarget by remember(slot.filePath) { mutableStateOf<SaveSyncMirrorTarget?>(null) }
+    var overwriteSyncToo by remember(slot.filePath) { mutableStateOf(false) }
     LaunchedEffect(slot.filePath) {
         inspection = withContext(Dispatchers.IO) { RenPySaveEditor.inspect(slot) }
         backups = withContext(Dispatchers.IO) { RenPySaveEditor.listBackups(slot) }
+        syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -7776,6 +8021,30 @@ private fun RenPySaveSlotDetailDialog(
                     editMessage?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                     }
+                    syncTarget?.let { target ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !editing) { overwriteSyncToo = !overwriteSyncToo },
+                        ) {
+                            Checkbox(
+                                checked = overwriteSyncToo,
+                                enabled = !editing,
+                                onCheckedChange = { overwriteSyncToo = it },
+                            )
+                            Column {
+                                Text("Overwrite sync too", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${target.fileName} • ${fmtDateTime(target.modifiedAt)} • ${fmtSize(target.sizeBytes)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
                     if (backups.isNotEmpty()) {
                         TextButton(enabled = !editing, onClick = { restorePickerOpen = true }) {
                             Text("Restore backup… (${backups.size})")
@@ -7797,10 +8066,11 @@ private fun RenPySaveSlotDetailDialog(
                     val query = variableFilter.trim()
                     val filteredVariables = loaded.variables.filter { variable ->
                         val typeMatches = variableTypeFilter == null || variable.type == variableTypeFilter
-                        val queryMatches = query.isBlank() ||
-                            variable.key.contains(query, ignoreCase = true) ||
-                            variable.displayValue.contains(query, ignoreCase = true) ||
-                            variable.type.contains(query, ignoreCase = true)
+                        val queryMatches = SaveSearchMatcher.matchesAny(
+                            query = query,
+                            wholeWord = wholeWordFilter,
+                            fields = listOf(variable.key, variable.displayValue, variable.type),
+                        )
                         typeMatches && queryMatches
                     }
                     val filterControls: @Composable ColumnScope.() -> Unit = {
@@ -7815,6 +8085,30 @@ private fun RenPySaveSlotDetailDialog(
                             )
                             editMessage?.let {
                                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                            }
+                            syncTarget?.let { target ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable(enabled = !editing) { overwriteSyncToo = !overwriteSyncToo },
+                                ) {
+                                    Checkbox(
+                                        checked = overwriteSyncToo,
+                                        enabled = !editing,
+                                        onCheckedChange = { overwriteSyncToo = it },
+                                    )
+                                    Column {
+                                        Text("Overwrite sync too", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "${target.fileName} • ${fmtDateTime(target.modifiedAt)} • ${fmtSize(target.sizeBytes)}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
                             }
                             if (backups.isNotEmpty()) {
                                 TextButton(enabled = !editing, onClick = { restorePickerOpen = true }) {
@@ -7844,6 +8138,11 @@ private fun RenPySaveSlotDetailDialog(
                                 .horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            FilterChip(
+                                selected = wholeWordFilter,
+                                onClick = { wholeWordFilter = !wholeWordFilter },
+                                label = { Text("Whole word", fontSize = 12.sp) },
+                            )
                             listOf(null, "int", "float", "bool", "string").forEach { type ->
                                 FilterChip(
                                     selected = variableTypeFilter == type,
@@ -7943,8 +8242,15 @@ private fun RenPySaveSlotDetailDialog(
                     sessionBackup = backup
                     editMessage = result.message
                     if (result.ok) {
+                        if (overwriteSyncToo) {
+                            syncTarget?.let { target ->
+                                val syncResult = SaveSyncMirror.overwriteSyncTarget(slot.filePath, target)
+                                editMessage = "${result.message} ${syncResult.message}"
+                            }
+                        }
                         inspection = withContext(Dispatchers.IO) { RenPySaveEditor.inspect(slot) }
                         backups = withContext(Dispatchers.IO) { RenPySaveEditor.listBackups(slot) }
+                        syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
                         editTarget = null
                     }
                     editing = false
@@ -9278,7 +9584,7 @@ private suspend fun checkAll(
 
 /** Merge JoiPlay sources: prefer backup-imported entries (better titles + engine info),
  *  fall back to folder-scan entries for anything not in the backup. */
-private fun mergeJoiPlaySources(
+fun mergeJoiPlaySources(
     backup: List<InstalledApp>,
     folder: List<InstalledApp>,
 ): List<InstalledApp> {

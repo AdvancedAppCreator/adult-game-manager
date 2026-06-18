@@ -140,6 +140,29 @@ class RenPySaveScannerTest {
     }
 
     @Test
+    fun broadScanCanDiscoverNestedSyncSaveFoldersSeparately() = runBlocking {
+        val gameDir = createTempDir(prefix = "renpy-sync-game-")
+        val saves = File(gameDir, "saves").apply { mkdirs() }
+        val sync = File(saves, "sync").apply { mkdirs() }
+        writeSaveZip(File(saves, "1-1.save"), renPyLogPickle(money = 10, name = "Local", flag = true))
+        writeSaveZip(File(sync, "1-1.save"), renPyLogPickle(money = 99, name = "Synced", flag = true))
+
+        val local = RenPySaveScanner.verifiedLocationForFolder(
+            saves.absolutePath,
+            InstalledApp(packageName = "org.renpy.test", label = "Test", versionName = "", versionCode = 1),
+        )
+        val synced = RenPySaveScanner.verifiedLocationForFolder(
+            sync.absolutePath,
+            InstalledApp(packageName = "org.renpy.test", label = "Test", versionName = "", versionCode = 1),
+        )
+
+        assertEquals(gameDir.name, local?.ownerId)
+        assertEquals("sync", synced?.ownerId)
+        assertEquals(1, RenPySaveScanner.listSaveSlots(local!!).size)
+        assertEquals(1, RenPySaveScanner.listSaveSlots(synced!!).size)
+    }
+
+    @Test
     fun editorInspectsAndPatchesDirectStoreScalars() = runBlocking {
         val save = File.createTempFile("renpy-edit-", ".save")
         save.deleteOnExit()

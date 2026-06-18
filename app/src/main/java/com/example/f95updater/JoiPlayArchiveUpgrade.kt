@@ -15,6 +15,7 @@ import net.lingala.zip4j.ZipFile
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -344,6 +345,7 @@ class JoiPlayArchiveUpgradeFlow(
             return
         }
         val copied = copySaveFiles(pendingWork.backup, pendingWork.target)
+        writeInstallMarker(pendingWork)
         pendingWork.deleteSourceOnSuccess?.let { src ->
             runCatching { if (src.exists()) src.delete() }
                 .onFailure { AppLog.w("JoiPlayUpgrade", "Could not delete source archive ${src.absolutePath}", it) }
@@ -359,6 +361,36 @@ class JoiPlayArchiveUpgradeFlow(
         )
         AppLog.i("JoiPlayUpgrade", "Upgraded ${pendingWork.app.label}: new=${pendingWork.target} backup=${pendingWork.backup} saves=$copied")
     }
+
+    private fun writeInstallMarker(pendingWork: Pending) {
+        val archive = pendingWork.archive
+        val archiveName = archive.name
+        val detectedVersion = JoiPlayVersionDetector.extractVersionFromArchiveName(archiveName)
+        val marker = JSONObject().apply {
+            put("schemaVersion", 1)
+            put("source", "agm-joiplay-upgrade")
+            put("sourceArchive", archiveName)
+            put("sourceArchiveSize", archive.length())
+            put("sourceArchiveLastModified", archive.lastModified())
+            put("detectedVersion", detectedVersion ?: JSONObject.NULL)
+            put("installedAt", isoNow())
+            put("previousFolderName", pendingWork.target.name)
+            put("previousLaunchFile", pendingWork.execFile)
+            put("appLabel", pendingWork.app.label)
+        }
+        runCatching {
+            File(pendingWork.target, JoiPlayVersionDetector.INSTALL_MARKER_FILE).writeText(marker.toString(2), Charsets.UTF_8)
+        }.onFailure {
+            if (it is IOException) {
+                AppLog.w("JoiPlayUpgrade", "Could not write AGM install marker for ${pendingWork.target}", it)
+            } else {
+                throw it
+            }
+        }
+    }
+
+    private fun isoNow(): String =
+        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US).format(Date())
 
     private fun ensureExecPath(target: File, execFile: String): Boolean {
         val wanted = File(target, execFile)

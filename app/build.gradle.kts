@@ -42,8 +42,8 @@ android {
         applicationId = "com.advancedappcreator.adultgamemanager"
         minSdk = 26
         targetSdk = 34
-        versionCode = 69
-        versionName = "1.0.51"
+        versionCode = 76
+        versionName = "1.0.58"
         ndk {
             // Single-ABI build keeps APK growth ~600 KB. Add armeabi-v7a / x86_64
             // later if anyone runs into "unrar lib unavailable" on older hardware
