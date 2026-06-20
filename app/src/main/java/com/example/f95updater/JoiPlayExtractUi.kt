@@ -2,7 +2,9 @@ package com.example.f95updater
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -798,7 +800,23 @@ internal fun humanSize(bytes: Long): String = when {
 internal fun hasAllFilesAccess(): Boolean {
     return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
         android.os.Environment.isExternalStorageManager()
-    } else true
+    } else {
+        StaticContext.appContext?.let { hasLegacyStorageAccess(it) } ?: false
+    }
+}
+
+internal fun hasLegacyStorageAccess(context: Context): Boolean {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) return true
+    val readGranted = ContextCompat.checkSelfPermission(
+        context,
+        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+    ) == PackageManager.PERMISSION_GRANTED
+    val writeGranted = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q ||
+        ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+        ) == PackageManager.PERMISSION_GRANTED
+    return readGranted && writeGranted
 }
 
 /** Open the system Settings page for granting MANAGE_EXTERNAL_STORAGE to this app. */

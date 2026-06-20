@@ -60,6 +60,8 @@ data class AppMapping(
     val personalRating: Int? = null,
     /** Private note shown only in this app and included in backups. */
     val personalNotes: String = "",
+    /** Why the user manually chose/corrected this mapping/version. Preserved across auto-refresh. */
+    val manualCorrectionNote: String = "",
 )
 
 @Serializable

@@ -6,11 +6,11 @@ Current public release:
 
 | Version | APK | SHA-256 |
 | --- | --- | --- |
-| 1.0.58 | `AdultGameManager-1.0.58-release.apk` | `7CA7D8B93E9B32BC38E1EB864D55532C3FB459EB1D3CBB5F688741110AC2E026` |
+| 1.0.62 | `AdultGameManager-1.0.62-release.apk` | `43934AEE1D32666EF24B541926A458C3FF60A71ED5A8C3C4BBC2C0E1D98406A4` |
 
 VirusTotal hash lookup, if/when the APK is submitted by any user:
 
-`https://www.virustotal.com/gui/file/7CA7D8B93E9B32BC38E1EB864D55532C3FB459EB1D3CBB5F688741110AC2E026`
+`https://www.virustotal.com/gui/file/43934AEE1D32666EF24B541926A458C3FF60A71ED5A8C3C4BBC2C0E1D98406A4`
 
 Public metadata:
 
@@ -18,4 +18,4 @@ Public metadata:
 
 Public APK:
 
-`https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/app/AdultGameManager-1.0.58-release.apk`
+`https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/app/AdultGameManager-1.0.62-release.apk`

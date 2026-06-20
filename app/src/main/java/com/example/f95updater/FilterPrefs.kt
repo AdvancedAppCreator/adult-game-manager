@@ -18,6 +18,7 @@ object FilterPrefs {
     private const val KEY_TAGS = "tag_filters"
     private const val KEY_SHOW_HIDDEN = "show_hidden"
     private const val KEY_MANUAL_ONLY = "manual_only"
+    private const val KEY_LAYOUT_MODE = "layout_mode"
 
     private fun prefs(c: Context): SharedPreferences =
         c.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -31,6 +32,7 @@ object FilterPrefs {
         val activeTags: List<String> = emptyList(),
         val showHidden: Boolean = false,
         val manualOnly: Boolean = false,
+        val layoutMode: LibraryLayoutMode = LibraryLayoutMode.List,
     )
 
     fun load(c: Context): State {
@@ -51,6 +53,9 @@ object FilterPrefs {
             activeTags = (p.getStringSet(KEY_TAGS, emptySet()) ?: emptySet()).toList(),
             showHidden = p.getBoolean(KEY_SHOW_HIDDEN, false),
             manualOnly = p.getBoolean(KEY_MANUAL_ONLY, false),
+            layoutMode = p.getString(KEY_LAYOUT_MODE, LibraryLayoutMode.List.name)?.let { name ->
+                runCatching { LibraryLayoutMode.valueOf(name) }.getOrNull()
+            } ?: LibraryLayoutMode.List,
         )
     }
 
@@ -64,6 +69,7 @@ object FilterPrefs {
             putStringSet(KEY_TAGS, s.activeTags.toSet())
             putBoolean(KEY_SHOW_HIDDEN, s.showHidden)
             putBoolean(KEY_MANUAL_ONLY, s.manualOnly)
+            putString(KEY_LAYOUT_MODE, s.layoutMode.name)
         }.apply()
     }
 }

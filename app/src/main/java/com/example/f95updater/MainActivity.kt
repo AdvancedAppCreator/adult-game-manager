@@ -25,6 +25,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -109,6 +112,11 @@ enum class SortKey(val label: String) {
     Status("Update status"),
 }
 
+enum class LibraryLayoutMode(val label: String) {
+    List("List"),
+    Cards("Cards"),
+}
+
 private fun statusOrder(s: UpdateStatus): Int = when (s) {
     UpdateStatus.UpdateAvailable -> 0
     UpdateStatus.Unknown -> 1
@@ -122,10 +130,11 @@ private fun AppMapping.withPersonalFieldsFrom(existing: AppMapping?): AppMapping
         userStatus = existing.userStatus,
         personalRating = existing.personalRating,
         personalNotes = existing.personalNotes,
+        manualCorrectionNote = existing.manualCorrectionNote,
     )
 
 private fun AppMapping.hasPersonalFields(): Boolean =
-    userStatus != UserGameStatus.None || personalRating != null || personalNotes.isNotBlank()
+    userStatus != UserGameStatus.None || personalRating != null || personalNotes.isNotBlank() || manualCorrectionNote.isNotBlank()
 
 private fun personalRatingLabel(rating: Int?): String =
     rating?.let { "$it/5" } ?: "Unrated"
@@ -645,7 +654,11 @@ private fun StartupPlaceholder() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 @Composable
 fun InstalledScreen(
     catalog: CatalogRepository,
@@ -659,6 +672,12 @@ fun InstalledScreen(
     val clipboard = LocalClipboardManager.current
     val rootView = LocalView.current
     val scope = rememberCoroutineScope()
+    val legacyStoragePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val granted = hasLegacyStorageAccess(context.applicationContext)
+        AppLog.i("Permissions", "Legacy storage permission result granted=$granted grants=$grants")
+    }
     val compactWidth = LocalConfiguration.current.screenWidthDp < 420
     val compactHeight = LocalConfiguration.current.screenHeightDp < 600
     val repo = sharedRepo
@@ -747,6 +766,7 @@ fun InstalledScreen(
     var rpgmSaveAssociationPicker by remember { mutableStateOf<RpgmSaveLocation?>(null) }
     var rpgmSaveViewerTarget by remember { mutableStateOf<AppRow?>(null) }
     var rpgmAddFolderTarget by remember { mutableStateOf<AppRow?>(null) }
+    var saveBackupBrowserOpen by remember { mutableStateOf(false) }
     var apkInstallPickerOpen by remember { mutableStateOf(false) }
     // Pending APK install confirmation: source file + non-persistent "delete on success".
     var apkInstallConfirm by remember { mutableStateOf<java.io.File?>(null) }
@@ -887,6 +907,7 @@ fun InstalledScreen(
     var hasSavesOnlyFilter by remember { mutableStateOf(false) }
     var sortMenuOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var libraryLayoutMode by remember { mutableStateOf(initialFilters.layoutMode) }
     var subCatalogOpen by remember { mutableStateOf(false) }
     var subJoiPlayOpen by remember { mutableStateOf(false) }
     var subSaveToolsOpen by remember { mutableStateOf(false) }
@@ -1869,7 +1890,7 @@ fun InstalledScreen(
 
     // Persist filter state whenever any of these change.
     LaunchedEffect(sortKey, sortDesc, nameFilter, sourceFilter, showHidden,
-        manualOnlyFilter, activeFilters.toList()) {
+        manualOnlyFilter, libraryLayoutMode, activeFilters.toList()) {
         FilterPrefs.save(
             context.applicationContext,
             FilterPrefs.State(
@@ -1881,6 +1902,7 @@ fun InstalledScreen(
                 activeTags = parseTagFilters(nameFilter),
                 showHidden = showHidden,
                 manualOnly = manualOnlyFilter,
+                layoutMode = libraryLayoutMode,
             )
         )
     }
@@ -2440,6 +2462,18 @@ fun InstalledScreen(
                                 leadingIcon = { Icon(if (showHidden) Icons.Default.Visibility else Icons.Default.VisibilityOff, null) },
                                 onClick = { menuOpen = false; showHidden = !showHidden }
                             )
+                            DropdownMenuItem(
+                                text = { Text("View type: ${libraryLayoutMode.label}") },
+                                leadingIcon = { Icon(if (libraryLayoutMode == LibraryLayoutMode.List) Icons.Default.ViewList else Icons.Default.GridView, null) },
+                                onClick = {
+                                    libraryLayoutMode = if (libraryLayoutMode == LibraryLayoutMode.List) {
+                                        LibraryLayoutMode.Cards
+                                    } else {
+                                        LibraryLayoutMode.List
+                                    }
+                                    menuOpen = false
+                                }
+                            )
 
                             HorizontalDivider()
 
@@ -2717,9 +2751,18 @@ fun InstalledScreen(
                                    }
                                 )
                                 DropdownMenuItem(
-                                   text = { Text("Show RPGM save folders") },
-                                   leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
-                                   enabled = rpgmSaveLocations.isNotEmpty() && !rpgmSaveScanning,
+                                   text = { Text("Browse save backups") },
+                                   leadingIcon = { Icon(Icons.Default.History, null) },
+                                   enabled = renPySaveLocations.isNotEmpty() || rpgmSaveLocations.isNotEmpty(),
+                                   onClick = {
+                                      menuOpen = false; subSaveToolsOpen = false
+                                      saveBackupBrowserOpen = true
+                                   }
+                                )
+                                DropdownMenuItem(
+                                  text = { Text("Show RPGM save folders") },
+                                  leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
+                                  enabled = rpgmSaveLocations.isNotEmpty() && !rpgmSaveScanning,
                                    onClick = {
                                       menuOpen = false; subSaveToolsOpen = false
                                       rpgmSaveLocationsOpen = true
@@ -2784,7 +2827,7 @@ fun InstalledScreen(
                                     }
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("Probably unused JoiPlay folders\u2026") },
+                                    text = { Text("JoiPlay cleanup review\u2026") },
                                     leadingIcon = {
                                         if (unusedFolderScanning) {
                                             CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
@@ -3288,6 +3331,184 @@ fun InstalledScreen(
                     }
                 }
             }
+            if (libraryLayoutMode == LibraryLayoutMode.Cards && rows.isNotEmpty()) {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 210.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 96.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    gridItems(rows, key = { it.installed.packageName }) { row ->
+                        val pkg = row.installed.packageName
+                        val isExpanded = pkg in expanded
+                        val rowThreadId = row.mapping?.threadId ?: F95UrlParser.extractThreadId(row.mapping?.f95Url)
+                        val catalogGame: CatalogGame? = remember(catalogById, rowThreadId) {
+                            rowThreadId?.let { catalogById?.get(it) }
+                        }
+                        val coverUrl = catalogGame?.cover?.takeIf { it.isNotBlank() }
+                        NiceGameCard(
+                            row = row,
+                            joiPlaySizeInfo = joiPlaySizeKey(row.installed)?.let { joiPlaySizeInfo[it] },
+                            isJoiPlaySizeScanning = joiPlaySizeKey(row.installed) in joiPlaySizeScanningFolders,
+                            renPySaves = renPySaveAssociations[row.installed.packageName].orEmpty(),
+                            rpgmSaves = rpgmSaveAssociations[row.installed.packageName].orEmpty(),
+                            expanded = isExpanded,
+                            catalogGame = catalogGame,
+                            catalogCover = coverUrl,
+                            catalogLabels = catalogLabels,
+                            selected = pkg in selection,
+                            selectionMode = selectionMode,
+                            onToggleSelect = {
+                                if (pkg in selection) selection.remove(pkg) else selection.add(pkg)
+                            },
+                            onLongPress = {
+                                if (pkg in selection) selection.remove(pkg) else selection.add(pkg)
+                            },
+                            onToggleExpand = {
+                                if (selectionMode) {
+                                    if (pkg in selection) selection.remove(pkg) else selection.add(pkg)
+                                } else {
+                                    if (isExpanded) expanded.remove(pkg) else expanded.add(pkg)
+                                }
+                            },
+                            onShowCover = { fullSizeImageUrl = it },
+                            onSnack = { snackbarMsg = it },
+                            onEdit = { dialogApp = row },
+                            onOpenRenPySaves = { renPySaveEditorTarget = row },
+                            onAddRenPySaveFolder = { renPyAddFolderTarget = row },
+                            onOpenRpgmSaves = { rpgmSaveViewerTarget = row },
+                            onAddRpgmSaveFolder = { rpgmAddFolderTarget = row },
+                            onLaunch = {
+                                if (row.installed.source == AppSource.JoiPlay) {
+                                    val err = runCatching { JoiPlayLauncher.launch(context, row.installed) }
+                                        .getOrElse { it.message ?: "unknown error" }
+                                    if (err != null) {
+                                        AppLog.w("Launch", "JoiPlay launch failed: $err; opening JoiPlay main")
+                                        snackbarMsg = err
+                                        runCatching {
+                                            val main = context.packageManager.getLaunchIntentForPackage("cyou.joiplay.joiplay")
+                                            if (main != null) context.startActivity(main)
+                                        }
+                                    }
+                                } else {
+                                    val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)
+                                    if (launchIntent != null) context.startActivity(launchIntent)
+                                    else snackbarMsg = "No launcher activity for ${row.installed.label}"
+                                }
+                            },
+                            onUninstall = {
+                                if (row.installed.source == AppSource.JoiPlay) {
+                                    scope.launch {
+                                        val hasUri = JoiPlayScanner.getRootUri(context.applicationContext) != null
+                                        if (hasUri) {
+                                            joiPlayDeleteConfirm = row
+                                        } else {
+                                            joiPlayGrantAskFor = row
+                                        }
+                                    }
+                                } else {
+                                    runCatching {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg"))
+                                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        )
+                                    }.onFailure { snackbarMsg = "Uninstall failed: ${it.message}" }
+                                }
+                            },
+                            onRefreshOne = {
+                                scope.launch {
+                                    if (row.installed.source == AppSource.JoiPlay) {
+                                        joiPlayDetecting = row
+                                        val candidates = runCatching {
+                                            JoiPlayVersionDetector.detect(context.applicationContext, row.installed)
+                                        }.getOrElse {
+                                            AppLog.w("Detect", "version detect failed", it)
+                                            emptyList()
+                                        }
+                                        joiPlayDetecting = null
+                                        val distinct = candidates.map { it.version }.distinct()
+                                        val gameId = row.installed.joiPlayGameId
+                                        suspend fun applyAndCheckSource(chosen: String?) {
+                                            if (chosen != null && gameId != null) {
+                                                JoiPlayVersionOverrides.set(context.applicationContext, gameId, chosen)
+                                                val android = InstalledAppsScanner.scan(context)
+                                                val backup = JoiPlayBackupReader.asInstalledApps(context.applicationContext)
+                                                val folder = JoiPlayScanner.scan(context.applicationContext)
+                                                apps = (android + mergeJoiPlaySources(backup, folder))
+                                                    .sortedBy { it.label.lowercase() }
+                                            }
+                                            if (!row.mapping?.f95Url.isNullOrBlank()) {
+                                                checkOne(row, scraper, repo)
+                                            } else {
+                                                val found = searcher.findF95Thread(row.installed.label)
+                                                if (!found.isNullOrBlank()) {
+                                                    repo.upsert(
+                                                        AppMapping(
+                                                            packageName = pkg,
+                                                            f95Url = found,
+                                                            lastSeenVersion = null,
+                                                            acknowledgedVersion = null,
+                                                            lastChecked = 0L,
+                                                            matchSource = "search-auto",
+                                                        ).withPersonalFieldsFrom(row.mapping)
+                                                    )
+                                                    val freshRow = AppRow(row.installed, AppMapping(pkg, found, matchSource = "search-auto").withPersonalFieldsFrom(row.mapping), row.status)
+                                                    checkOne(freshRow, scraper, repo)
+                                                }
+                                            }
+                                            snackbarMsg = if (chosen != null)
+                                                "Set version $chosen for ${row.installed.label}"
+                                            else "Refreshed ${row.installed.label}"
+                                        }
+                                        when {
+                                            candidates.isEmpty() -> {
+                                                snackbarMsg = "No version detected. Tap 'Edit URL' to set manually."
+                                                applyAndCheckSource(null)
+                                            }
+                                            distinct.size == 1 -> applyAndCheckSource(distinct[0])
+                                            else -> {
+                                                joiPlayVersionDialog = Triple(row, candidates) {
+                                                    /* dialog closed without selecting */
+                                                }
+                                            }
+                                        }
+                                    } else if (!row.mapping?.f95Url.isNullOrBlank()) {
+                                        checkOne(row, scraper, repo)
+                                        snackbarMsg = "Refreshed ${row.installed.label}"
+                                    } else {
+                                        snackbarMsg = "Searching catalog for ${row.installed.label}…"
+                                        val found = searcher.findF95Thread(row.installed.label)
+                                        if (found.isNullOrBlank()) {
+                                            snackbarMsg = "Unable to fetch URL for ${row.installed.label}"
+                                        } else {
+                                            repo.upsert(
+                                                AppMapping(
+                                                    packageName = pkg,
+                                                    f95Url = found,
+                                                    lastSeenVersion = null,
+                                                    acknowledgedVersion = null,
+                                                    lastChecked = 0L,
+                                                    matchSource = "search-auto",
+                                                ).withPersonalFieldsFrom(row.mapping)
+                                            )
+                                            val freshRow = AppRow(row.installed, AppMapping(pkg, found, matchSource = "search-auto").withPersonalFieldsFrom(row.mapping), row.status)
+                                            checkOne(freshRow, scraper, repo)
+                                            snackbarMsg = "Found URL & refreshed ${row.installed.label}"
+                                        }
+                                    }
+                                }
+                            },
+                            onOpen = {
+                                val target = row.mapping?.f95Url
+                                    ?: "https://www.google.com/search?q=" +
+                                        Uri.encode("\"${row.installed.label}\" f95zone")
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+                            },
+                        )
+                    }
+                }
+            } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(start = 4.dp, top = 4.dp, end = 4.dp, bottom = 96.dp)
@@ -3508,6 +3729,7 @@ fun InstalledScreen(
                     )
                 }
             }
+            }
         }
     }
 
@@ -3532,7 +3754,7 @@ fun InstalledScreen(
                     returnToUnmappedAfterDialog = false
                 }
             },
-            onSave = { newUrl, userStatus, personalRating, personalNotes ->
+            onSave = { newUrl, userStatus, personalRating, personalNotes, correctionNote ->
                 scope.launch {
                     val tid = F95UrlParser.extractThreadId(newUrl)
                     repo.upsert(
@@ -3548,6 +3770,7 @@ fun InstalledScreen(
                             userStatus = userStatus,
                             personalRating = personalRating,
                             personalNotes = personalNotes.trim(),
+                            manualCorrectionNote = correctionNote.trim(),
                         )
                     )
                     dialogApp = null
@@ -4821,6 +5044,13 @@ fun InstalledScreen(
             onDismiss = { rpgmSaveViewerTarget = null },
         )
     }
+    if (saveBackupBrowserOpen) {
+        SaveBackupBrowserDialog(
+            renPyLocations = renPySaveLocations,
+            rpgmLocations = rpgmSaveLocations,
+            onDismiss = { saveBackupBrowserOpen = false },
+        )
+    }
     rpgmAddFolderTarget?.let { row ->
         FolderPickerDialog(
             initialPath = row.installed.storagePath ?: android.os.Environment.getExternalStorageDirectory().absolutePath,
@@ -5407,7 +5637,19 @@ fun InstalledScreen(
                     PermissionRationale.AllFilesInstallApk,
                     PermissionRationale.AllFilesJoiPlayInstall,
                     PermissionRationale.AllFilesUnusedFolders,
-                    PermissionRationale.AllFilesRenPySaves -> requestAllFilesAccess(context)
+                    PermissionRationale.AllFilesRenPySaves -> {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                            requestAllFilesAccess(context)
+                        } else {
+                            val permissions = buildList {
+                                add(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+                                    add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                }
+                            }.toTypedArray()
+                            legacyStoragePermissionLauncher.launch(permissions)
+                        }
+                    }
                     PermissionRationale.UsageAccess -> context.startActivity(
                         Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -5599,6 +5841,29 @@ private fun statusColor(s: UpdateStatus): Color = when (s) {
     UpdateStatus.CheckFailed -> Color(0xFFBA68C8)
 }
 
+private fun versionEvidenceSummary(app: InstalledApp, mapping: AppMapping?): String {
+    val installed = app.versionName.ifBlank { "unknown" }
+    val installedSource = when (app.source) {
+        AppSource.Android -> "Android PackageManager versionName"
+        AppSource.JoiPlay -> "JoiPlay row/folder metadata; use Detect version for file/marker candidates"
+    }
+    val latest = mapping?.lastSeenVersion?.let { "latest catalog $it" } ?: "no catalog version"
+    return "$installed from $installedSource; $latest"
+}
+
+private fun updateDecisionSummary(app: InstalledApp, mapping: AppMapping?, status: UpdateStatus): String =
+    when {
+        mapping == null || mapping.f95Url.isNullOrBlank() -> "Unmapped: no source URL/catalog entry."
+        mapping.lastSeenVersion == null -> "Unknown: mapped, but latest catalog version is unknown."
+        mapping.acknowledgedVersion != null && mapping.acknowledgedVersion == mapping.lastSeenVersion ->
+            "Current: user acknowledged ${mapping.lastSeenVersion} as installed."
+        VersionCompare.matchesInstalled(mapping.lastSeenVersion, app.versionName) ->
+            "Current: installed '${app.versionName}' structurally matches catalog '${mapping.lastSeenVersion}'."
+        status == UpdateStatus.UpdateAvailable ->
+            "Update: installed '${app.versionName.ifBlank { "unknown" }}' differs from catalog '${mapping.lastSeenVersion}'."
+        else -> "${statusLabel(status)}: installed '${app.versionName.ifBlank { "unknown" }}', catalog '${mapping.lastSeenVersion}'."
+    }
+
 private val dateFmt: DateFormat = DateFormat.getDateInstance(DateFormat.MEDIUM)
 private val dateTimeFmt: DateFormat = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
 
@@ -5619,6 +5884,254 @@ private fun fmtSize(bytes: Long): String = when {
 private fun hasPersistedReadPermission(context: Context, uri: Uri): Boolean {
     return context.contentResolver.persistedUriPermissions.any { permission ->
         permission.uri == uri && permission.isReadPermission
+    }
+}
+
+@Composable
+private fun GameActionDropdown(
+    row: AppRow,
+    renPySaves: List<RenPySaveAssociation>,
+    rpgmSaves: List<RpgmSaveLocation>,
+    expanded: Boolean,
+    actionMenuOpen: Boolean,
+    onDismiss: () -> Unit,
+    onLaunch: () -> Unit,
+    onOpen: () -> Unit,
+    onRefreshOne: () -> Unit,
+    onEdit: () -> Unit,
+    onOpenRenPySaves: () -> Unit,
+    onAddRenPySaveFolder: () -> Unit,
+    onOpenRpgmSaves: () -> Unit,
+    onAddRpgmSaveFolder: () -> Unit,
+    onToggleExpand: () -> Unit,
+    onUninstall: () -> Unit,
+) {
+    DropdownMenu(expanded = actionMenuOpen, onDismissRequest = onDismiss) {
+        Text(
+            "Game actions",
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        DropdownMenuItem(
+            text = { Text("Launch game/app") },
+            leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
+            onClick = { onDismiss(); onLaunch() },
+        )
+        DropdownMenuItem(
+            text = { Text(if (row.mapping?.f95Url != null) "Open source page" else "Search source page") },
+            leadingIcon = {
+                Icon(if (row.mapping?.f95Url != null) Icons.Default.OpenInBrowser else Icons.Default.Search, null)
+            },
+            onClick = { onDismiss(); onOpen() },
+        )
+        DropdownMenuItem(
+            text = { Text("Refresh this game") },
+            leadingIcon = { Icon(Icons.Default.Refresh, null) },
+            onClick = { onDismiss(); onRefreshOne() },
+        )
+        DropdownMenuItem(
+            text = { Text("Edit catalog match") },
+            leadingIcon = { Icon(Icons.Default.Edit, null) },
+            onClick = { onDismiss(); onEdit() },
+        )
+        DropdownMenuItem(
+            text = { Text(if (expanded) "Hide details" else "Show details") },
+            leadingIcon = { Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null) },
+            onClick = { onDismiss(); onToggleExpand() },
+        )
+        HorizontalDivider()
+        Text(
+            "Save tools",
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        DropdownMenuItem(
+            text = { Text("Open Ren'Py save editor") },
+            leadingIcon = { Icon(Icons.Default.Save, null) },
+            enabled = renPySaves.isNotEmpty(),
+            onClick = { onDismiss(); onOpenRenPySaves() },
+        )
+        DropdownMenuItem(
+            text = { Text("Add Ren'Py save folder") },
+            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+            onClick = { onDismiss(); onAddRenPySaveFolder() },
+        )
+        DropdownMenuItem(
+            text = { Text("Open RPGM save editor") },
+            leadingIcon = { Icon(Icons.Default.Save, null) },
+            enabled = rpgmSaves.isNotEmpty(),
+            onClick = { onDismiss(); onOpenRpgmSaves() },
+        )
+        DropdownMenuItem(
+            text = { Text("Add RPGM save folder") },
+            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+            onClick = { onDismiss(); onAddRpgmSaveFolder() },
+        )
+        HorizontalDivider()
+        Text(
+            "Storage",
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        DropdownMenuItem(
+            text = { Text(if (row.installed.source == AppSource.JoiPlay) "Delete JoiPlay game" else "Uninstall Android app") },
+            leadingIcon = { Icon(Icons.Default.Delete, null) },
+            onClick = { onDismiss(); onUninstall() },
+        )
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun NiceGameCard(
+    row: AppRow,
+    joiPlaySizeInfo: JoiPlayScanner.SizeInfo?,
+    isJoiPlaySizeScanning: Boolean,
+    renPySaves: List<RenPySaveAssociation>,
+    rpgmSaves: List<RpgmSaveLocation>,
+    expanded: Boolean,
+    catalogGame: CatalogGame?,
+    catalogCover: String?,
+    catalogLabels: CatalogLabels?,
+    selected: Boolean,
+    selectionMode: Boolean,
+    onToggleSelect: () -> Unit,
+    onLongPress: () -> Unit,
+    onToggleExpand: () -> Unit,
+    onEdit: () -> Unit,
+    onOpenRenPySaves: () -> Unit,
+    onAddRenPySaveFolder: () -> Unit,
+    onOpenRpgmSaves: () -> Unit,
+    onAddRpgmSaveFolder: () -> Unit,
+    onLaunch: () -> Unit,
+    onUninstall: () -> Unit,
+    onRefreshOne: () -> Unit,
+    onOpen: () -> Unit,
+    onShowCover: (String) -> Unit,
+    onSnack: (String) -> Unit,
+) {
+    var actionMenuOpen by remember { mutableStateOf(false) }
+    val displayTotalSize = effectiveInstalledSize(row.installed, joiPlaySizeInfo)
+    Box {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { if (selectionMode) onToggleSelect() else actionMenuOpen = true },
+                    onLongClick = onLongPress,
+                ),
+            colors = CardDefaults.cardColors(
+                containerColor = when {
+                    selected -> MaterialTheme.colorScheme.secondaryContainer
+                    row.installed.source == AppSource.JoiPlay ->
+                        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.25f)
+                    else -> MaterialTheme.colorScheme.surface
+                },
+            ),
+        ) {
+            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (!catalogCover.isNullOrBlank()) {
+                    coil.compose.AsyncImage(
+                        model = catalogCover,
+                        contentDescription = "Cover",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(118.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .clickable { onShowCover(catalogCover) },
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                }
+                Text(
+                    row.installed.label + (row.installed.launcherLabel?.let { " ($it)" } ?: ""),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                catalogGame?.title?.takeIf { ct ->
+                    ct.isNotBlank() &&
+                        CatalogRepository.normalizeTitle(ct) != CatalogRepository.normalizeTitle(row.installed.label)
+                }?.let {
+                    Text(
+                        "Catalog: $it",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                catalogGame?.let { cg ->
+                    val prefixNames = catalogLabels?.let { l -> cg.prefixes.mapNotNull { l.prefixes[it.toString()] } }
+                    if (!prefixNames.isNullOrEmpty()) {
+                        Text(
+                            prefixNames.joinToString(" • "),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Text(
+                    listOfNotNull(
+                        row.installed.versionName.ifBlank { "?" },
+                        row.mapping?.lastSeenVersion?.let { "→ $it" },
+                    ).joinToString(" "),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(modifier = Modifier.size(10.dp).background(statusColor(row.status), MaterialTheme.shapes.small))
+                    Text(statusLabel(row.status), style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        if (isJoiPlaySizeScanning) "Scanning…" else fmtSize(displayTotalSize),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                val saveParts = buildList {
+                    if (renPySaves.isNotEmpty()) add("Ren'Py saves ${renPySaves.sumOf { it.saveCount }}")
+                    if (rpgmSaves.isNotEmpty()) add("RPGM saves ${rpgmSaves.sumOf { it.saveCount }}")
+                }
+                if (saveParts.isNotEmpty()) {
+                    Text(
+                        saveParts.joinToString(" • "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        GameActionDropdown(
+            row = row,
+            renPySaves = renPySaves,
+            rpgmSaves = rpgmSaves,
+            expanded = expanded,
+            actionMenuOpen = actionMenuOpen,
+            onDismiss = { actionMenuOpen = false },
+            onLaunch = onLaunch,
+            onOpen = onOpen,
+            onRefreshOne = onRefreshOne,
+            onEdit = onEdit,
+            onOpenRenPySaves = onOpenRenPySaves,
+            onAddRenPySaveFolder = onAddRenPySaveFolder,
+            onOpenRpgmSaves = onOpenRpgmSaves,
+            onAddRpgmSaveFolder = onAddRpgmSaveFolder,
+            onToggleExpand = onToggleExpand,
+            onUninstall = onUninstall,
+        )
     }
 }
 
@@ -5850,77 +6363,24 @@ private fun AppRowCard(
                     IconButton(onClick = { actionMenuOpen = true }, modifier = Modifier.size(36.dp)) {
                         Icon(Icons.Default.MoreVert, contentDescription = "Game actions", modifier = Modifier.size(20.dp))
                     }
-                    DropdownMenu(expanded = actionMenuOpen, onDismissRequest = { actionMenuOpen = false }) {
-                        Text(
-                            "Game actions",
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Launch game/app") },
-                            leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
-                            onClick = { actionMenuOpen = false; onLaunch() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text(if (row.mapping?.f95Url != null) "Open source page" else "Search source page") },
-                            leadingIcon = {
-                                Icon(if (row.mapping?.f95Url != null) Icons.Default.OpenInBrowser else Icons.Default.Search, null)
-                            },
-                            onClick = { actionMenuOpen = false; onOpen() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Refresh this game") },
-                            leadingIcon = { Icon(Icons.Default.Refresh, null) },
-                            onClick = { actionMenuOpen = false; onRefreshOne() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Edit catalog match") },
-                            leadingIcon = { Icon(Icons.Default.Edit, null) },
-                            onClick = { actionMenuOpen = false; onEdit() },
-                        )
-                        HorizontalDivider()
-                        Text(
-                            "Save tools",
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Open Ren'Py save editor") },
-                            leadingIcon = { Icon(Icons.Default.Save, null) },
-                            enabled = renPySaves.isNotEmpty(),
-                            onClick = { actionMenuOpen = false; onOpenRenPySaves() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Add Ren'Py save folder") },
-                            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
-                            onClick = { actionMenuOpen = false; onAddRenPySaveFolder() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Open RPGM save editor") },
-                            leadingIcon = { Icon(Icons.Default.Save, null) },
-                            enabled = rpgmSaves.isNotEmpty(),
-                            onClick = { actionMenuOpen = false; onOpenRpgmSaves() },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Add RPGM save folder") },
-                            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
-                            onClick = { actionMenuOpen = false; onAddRpgmSaveFolder() },
-                        )
-                        HorizontalDivider()
-                        Text(
-                            "Storage",
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                        DropdownMenuItem(
-                            text = { Text(if (row.installed.source == AppSource.JoiPlay) "Delete JoiPlay game" else "Uninstall Android app") },
-                            leadingIcon = { Icon(Icons.Default.Delete, null) },
-                            onClick = { actionMenuOpen = false; onUninstall() },
-                        )
-                    }
+                    GameActionDropdown(
+                        row = row,
+                        renPySaves = renPySaves,
+                        rpgmSaves = rpgmSaves,
+                        expanded = expanded,
+                        actionMenuOpen = actionMenuOpen,
+                        onDismiss = { actionMenuOpen = false },
+                        onLaunch = onLaunch,
+                        onOpen = onOpen,
+                        onRefreshOne = onRefreshOne,
+                        onEdit = onEdit,
+                        onOpenRenPySaves = onOpenRenPySaves,
+                        onAddRenPySaveFolder = onAddRenPySaveFolder,
+                        onOpenRpgmSaves = onOpenRpgmSaves,
+                        onAddRpgmSaveFolder = onAddRpgmSaveFolder,
+                        onToggleExpand = onToggleExpand,
+                        onUninstall = onUninstall,
+                    )
                 }
             }
         }
@@ -5973,12 +6433,18 @@ private fun AppRowCard(
                     if (mapping.personalNotes.isNotBlank()) {
                         DetailRow("Your notes", mapping.personalNotes)
                     }
+                    if (mapping.manualCorrectionNote.isNotBlank()) {
+                        DetailRow("Manual correction", mapping.manualCorrectionNote)
+                    }
                 }
                 row.mapping?.f95Url?.let { DetailRow("Source URL", it) }
                 row.mapping?.acknowledgedVersion?.let { DetailRow("Acknowledged", it) }
                 if (row.mapping?.lastChecked != null && row.mapping.lastChecked > 0L) {
                     DetailRow("Last checked", fmtDateTime(row.mapping.lastChecked))
                 }
+                DetailRow("Installed-version source", versionEvidenceSummary(row.installed, row.mapping))
+                DetailRow("Update decision", updateDecisionSummary(row.installed, row.mapping, row.status))
+                row.mapping?.matchSource?.let { DetailRow("Match source", it) }
                 if (renPySaves.isNotEmpty()) {
                     Spacer(Modifier.height(4.dp))
                     HorizontalDivider()
@@ -7071,6 +7537,102 @@ private fun RpgmSaveSlotRow(slot: RpgmSaveSlot, onClick: () -> Unit) {
     }
 }
 
+private data class SaveBackupBrowserEntry(
+    val engine: String,
+    val gameLabel: String,
+    val slotName: String,
+    val backup: RenPySaveBackup,
+)
+
+@Composable
+private fun SaveBackupBrowserDialog(
+    renPyLocations: List<RenPySaveLocation>,
+    rpgmLocations: List<RpgmSaveLocation>,
+    onDismiss: () -> Unit,
+) {
+    val clipboard = LocalClipboardManager.current
+    var loading by remember { mutableStateOf(true) }
+    var entries by remember { mutableStateOf<List<SaveBackupBrowserEntry>>(emptyList()) }
+    LaunchedEffect(renPyLocations, rpgmLocations) {
+        loading = true
+        entries = withContext(Dispatchers.IO) {
+            buildList {
+                for (location in renPyLocations) {
+                    val label = location.associatedLabel ?: location.ownerId
+                    for (slot in RenPySaveScanner.listSaveSlots(location)) {
+                        for (backup in RenPySaveEditor.listBackups(slot)) {
+                            add(SaveBackupBrowserEntry("Ren'Py", label, slot.fileName, backup))
+                        }
+                    }
+                }
+                for (location in rpgmLocations) {
+                    val label = location.associatedLabel ?: location.ownerId
+                    for (slot in RpgmSaveScanner.listSaveSlots(location)) {
+                        for (backup in RpgmSaveEditor.listBackups(slot)) {
+                            add(SaveBackupBrowserEntry("RPGM", label, slot.fileName, backup))
+                        }
+                    }
+                }
+            }.sortedByDescending { it.backup.createdAt }
+        }
+        loading = false
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier
+            .fillMaxWidth(0.96f)
+            .fillMaxHeight(0.88f),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        title = { Text("Save backup browser") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Backups are grouped from currently scanned Ren'Py/RPGM save folders. Open a slot editor to restore.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                when {
+                    loading -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("Loading backups…", style = MaterialTheme.typography.bodySmall)
+                    }
+                    entries.isEmpty() -> Text("No AGM-managed save backups found.", style = MaterialTheme.typography.bodySmall)
+                    else -> LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 520.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        items(entries) { entry ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text("${entry.engine} • ${entry.gameLabel}", fontWeight = FontWeight.SemiBold)
+                                    Text("Slot: ${entry.slotName}", style = MaterialTheme.typography.bodySmall)
+                                    Text(
+                                        "${entry.backup.fileName} • ${fmtDateTime(entry.backup.createdAt)} • ${fmtSize(entry.backup.sizeBytes)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    TextButton(onClick = { clipboard.setText(AnnotatedString(entry.backup.filePath)) }) {
+                                        Text("Copy backup path")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
 @Composable
 private fun RpgmSaveSlotDetailDialog(
     slot: RpgmSaveSlot,
@@ -7092,6 +7654,7 @@ private fun RpgmSaveSlotDetailDialog(
     var typeFilter by remember { mutableStateOf<String?>(null) }
     var syncTarget by remember(slot.filePath) { mutableStateOf<SaveSyncMirrorTarget?>(null) }
     var overwriteSyncToo by remember(slot.filePath) { mutableStateOf(false) }
+    val stagedValues = remember(slot.filePath) { mutableStateMapOf<String, String>() }
     LaunchedEffect(slot.filePath) {
         inspection = withContext(Dispatchers.IO) { RpgmSaveEditor.inspect(slot) }
         backups = withContext(Dispatchers.IO) { RpgmSaveEditor.listBackups(slot) }
@@ -7163,11 +7726,12 @@ private fun RpgmSaveSlotDetailDialog(
                     loaded.warning?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                     val q = valueFilter.trim()
                     val values = loaded.values.filter { value ->
+                        val effectiveValue = stagedValues[value.path] ?: value.displayValue
                         (typeFilter == null || value.type == typeFilter) &&
                             SaveSearchMatcher.matchesAny(
                                 query = q,
                                 wholeWord = wholeWordFilter,
-                                fields = listOf(value.path, value.displayValue, value.type),
+                                fields = listOf(value.path, effectiveValue, value.type),
                             )
                     }
                     val filterControls: @Composable ColumnScope.() -> Unit = {
@@ -7246,6 +7810,13 @@ private fun RpgmSaveSlotDetailDialog(
                             }
                         }
                         Text("${values.size} of ${loaded.values.size} values", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (stagedValues.isNotEmpty()) {
+                            Text(
+                                "${stagedValues.size} staged edit${if (stagedValues.size == 1) "" else "s"} - tap Save to write",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                     val valueList: @Composable (Modifier) -> Unit = { modifier ->
                         if (values.isEmpty()) {
@@ -7257,6 +7828,8 @@ private fun RpgmSaveSlotDetailDialog(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 values.forEach { value ->
+                                    val staged = stagedValues[value.path]
+                                    val displayValue = staged ?: value.displayValue
                                     Surface(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -7267,9 +7840,9 @@ private fun RpgmSaveSlotDetailDialog(
                                         Column(modifier = Modifier.padding(8.dp)) {
                                             Text(value.path, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
                                             Text(
-                                                "${value.type}: ${value.displayValue}",
+                                                "${value.type}: $displayValue" + if (staged != null) " (staged)" else "",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                color = if (staged != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
@@ -7309,7 +7882,50 @@ private fun RpgmSaveSlotDetailDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    enabled = !editing && stagedValues.isNotEmpty(),
+                    onClick = {
+                        editing = true
+                        scope.launch {
+                            var backup = sessionBackup
+                            var message = ""
+                            var saved = 0
+                            val pending = stagedValues.toList()
+                            for ((path, newValue) in pending) {
+                                val (result, nextBackup) = RpgmSaveEditor.edit(slot, path, newValue, backup)
+                                backup = nextBackup
+                                message = result.message
+                                if (!result.ok) break
+                                saved++
+                            }
+                            sessionBackup = backup
+                            val allSaved = saved == pending.size
+                            if (allSaved) {
+                                if (overwriteSyncToo) {
+                                    syncTarget?.let { target ->
+                                        val syncResult = SaveSyncMirror.overwriteSyncTarget(slot.filePath, target)
+                                        message = "$message ${syncResult.message}"
+                                    }
+                                }
+                                stagedValues.clear()
+                                inspection = withContext(Dispatchers.IO) { RpgmSaveEditor.inspect(slot) }
+                                backups = withContext(Dispatchers.IO) { RpgmSaveEditor.listBackups(slot) }
+                                syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
+                            }
+                            editMessage = if (saved > 1 && allSaved) {
+                                "Saved $saved edits. $message"
+                            } else {
+                                message.ifBlank { "Saved $saved edits." }
+                            }
+                            editing = false
+                        }
+                    },
+                ) { Text(if (editing) "Saving…" else "Save") }
+                TextButton(onClick = onDismiss, enabled = !editing) { Text("Close") }
+            }
+        },
     )
     editTarget?.let { value ->
         RpgmValueEditDialog(
@@ -7317,25 +7933,14 @@ private fun RpgmSaveSlotDetailDialog(
             busy = editing,
             onDismiss = { if (!editing) editTarget = null },
             onSave = { newValue ->
-                editing = true
-                scope.launch {
-                    val (result, backup) = RpgmSaveEditor.edit(slot, value.path, newValue, sessionBackup)
-                    sessionBackup = backup
-                    editMessage = result.message
-                    if (result.ok) {
-                        if (overwriteSyncToo) {
-                            syncTarget?.let { target ->
-                                val syncResult = SaveSyncMirror.overwriteSyncTarget(slot.filePath, target)
-                                editMessage = "${result.message} ${syncResult.message}"
-                            }
-                        }
-                        inspection = withContext(Dispatchers.IO) { RpgmSaveEditor.inspect(slot) }
-                        backups = withContext(Dispatchers.IO) { RpgmSaveEditor.listBackups(slot) }
-                        syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
-                        editTarget = null
-                    }
-                    editing = false
+                val original = inspection?.values?.firstOrNull { it.path == value.path }?.displayValue ?: value.displayValue
+                if (newValue == original) {
+                    stagedValues.remove(value.path)
+                } else {
+                    stagedValues[value.path] = newValue
                 }
+                editMessage = "Staged ${value.path}. Tap Save to write changes."
+                editTarget = null
             },
         )
     }
@@ -7990,6 +8595,7 @@ private fun RenPySaveSlotDetailDialog(
     var restoreTarget by remember { mutableStateOf<RenPySaveBackup?>(null) }
     var syncTarget by remember(slot.filePath) { mutableStateOf<SaveSyncMirrorTarget?>(null) }
     var overwriteSyncToo by remember(slot.filePath) { mutableStateOf(false) }
+    val stagedVariables = remember(slot.filePath) { mutableStateMapOf<String, String>() }
     LaunchedEffect(slot.filePath) {
         inspection = withContext(Dispatchers.IO) { RenPySaveEditor.inspect(slot) }
         backups = withContext(Dispatchers.IO) { RenPySaveEditor.listBackups(slot) }
@@ -8065,11 +8671,12 @@ private fun RenPySaveSlotDetailDialog(
                     }
                     val query = variableFilter.trim()
                     val filteredVariables = loaded.variables.filter { variable ->
+                        val effectiveValue = stagedVariables[variable.key] ?: variable.displayValue
                         val typeMatches = variableTypeFilter == null || variable.type == variableTypeFilter
                         val queryMatches = SaveSearchMatcher.matchesAny(
                             query = query,
                             wholeWord = wholeWordFilter,
-                            fields = listOf(variable.key, variable.displayValue, variable.type),
+                            fields = listOf(variable.key, effectiveValue, variable.type),
                         )
                         typeMatches && queryMatches
                     }
@@ -8156,6 +8763,13 @@ private fun RenPySaveSlotDetailDialog(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (stagedVariables.isNotEmpty()) {
+                            Text(
+                                "${stagedVariables.size} staged edit${if (stagedVariables.size == 1) "" else "s"} - tap Save to write",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                     val valueList: @Composable (Modifier) -> Unit = { modifier ->
                         if (filteredVariables.isEmpty()) {
@@ -8167,6 +8781,8 @@ private fun RenPySaveSlotDetailDialog(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 filteredVariables.forEach { variable ->
+                                    val staged = stagedVariables[variable.key]
+                                    val displayValue = staged ?: variable.displayValue
                                     Surface(
                                         modifier = Modifier
                                             .fillMaxWidth()
@@ -8177,9 +8793,9 @@ private fun RenPySaveSlotDetailDialog(
                                         Column(modifier = Modifier.padding(8.dp)) {
                                             Text(variable.key, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
                                             Text(
-                                                "${variable.type}: ${variable.displayValue}",
+                                                "${variable.type}: $displayValue" + if (staged != null) " (staged)" else "",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                color = if (staged != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                                 maxLines = 2,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
@@ -8220,12 +8836,54 @@ private fun RenPySaveSlotDetailDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = {
-                    clipboard.setText(AnnotatedString(slot.filePath))
-                },
-            ) {
-                Text("Copy path")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    enabled = !editing && stagedVariables.isNotEmpty(),
+                    onClick = {
+                        editing = true
+                        scope.launch {
+                            var backup = sessionBackup
+                            var message = ""
+                            var saved = 0
+                            val pending = stagedVariables.toList()
+                            for ((key, newValue) in pending) {
+                                val (result, nextBackup) = RenPySaveEditor.edit(slot, key, newValue, backup)
+                                backup = nextBackup
+                                message = result.message
+                                if (!result.ok) break
+                                saved++
+                            }
+                            sessionBackup = backup
+                            val allSaved = saved == pending.size
+                            if (allSaved) {
+                                if (overwriteSyncToo) {
+                                    syncTarget?.let { target ->
+                                        val syncResult = SaveSyncMirror.overwriteSyncTarget(slot.filePath, target)
+                                        message = "$message ${syncResult.message}"
+                                    }
+                                }
+                                stagedVariables.clear()
+                                inspection = withContext(Dispatchers.IO) { RenPySaveEditor.inspect(slot) }
+                                backups = withContext(Dispatchers.IO) { RenPySaveEditor.listBackups(slot) }
+                                syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
+                            }
+                            editMessage = if (saved > 1 && allSaved) {
+                                "Saved $saved edits. $message"
+                            } else {
+                                message.ifBlank { "Saved $saved edits." }
+                            }
+                            editing = false
+                        }
+                    },
+                ) { Text(if (editing) "Saving…" else "Save") }
+                TextButton(
+                    onClick = {
+                        clipboard.setText(AnnotatedString(slot.filePath))
+                    },
+                    enabled = !editing,
+                ) {
+                    Text("Copy path")
+                }
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
@@ -8236,25 +8894,14 @@ private fun RenPySaveSlotDetailDialog(
             busy = editing,
             onDismiss = { if (!editing) editTarget = null },
             onSave = { newValue ->
-                editing = true
-                scope.launch {
-                    val (result, backup) = RenPySaveEditor.edit(slot, variable.key, newValue, sessionBackup)
-                    sessionBackup = backup
-                    editMessage = result.message
-                    if (result.ok) {
-                        if (overwriteSyncToo) {
-                            syncTarget?.let { target ->
-                                val syncResult = SaveSyncMirror.overwriteSyncTarget(slot.filePath, target)
-                                editMessage = "${result.message} ${syncResult.message}"
-                            }
-                        }
-                        inspection = withContext(Dispatchers.IO) { RenPySaveEditor.inspect(slot) }
-                        backups = withContext(Dispatchers.IO) { RenPySaveEditor.listBackups(slot) }
-                        syncTarget = SaveSyncMirror.findSyncTarget(slot.filePath)
-                        editTarget = null
-                    }
-                    editing = false
+                val original = inspection?.variables?.firstOrNull { it.key == variable.key }?.displayValue ?: variable.displayValue
+                if (newValue == original) {
+                    stagedVariables.remove(variable.key)
+                } else {
+                    stagedVariables[variable.key] = newValue
                 }
+                editMessage = "Staged ${variable.key}. Tap Save to write changes."
+                editTarget = null
             },
         )
     }
@@ -9050,7 +9697,7 @@ private fun EditMappingDialog(
     catalog: CatalogRepository,
     searcher: WebSearcher,
     onDismiss: () -> Unit,
-    onSave: (String, UserGameStatus, Int?, String) -> Unit,
+    onSave: (String, UserGameStatus, Int?, String, String) -> Unit,
     onPickCatalog: (CatalogGame) -> Unit,
     onPickExternal: (ExternalMirrorResult) -> Unit,
     onMarkNotOnF95: () -> Unit,
@@ -9063,6 +9710,7 @@ private fun EditMappingDialog(
     var userStatus by remember(row.installed.packageName) { mutableStateOf(row.mapping?.userStatus ?: UserGameStatus.None) }
     var personalRating by remember(row.installed.packageName) { mutableStateOf(row.mapping?.personalRating) }
     var personalNotes by remember(row.installed.packageName) { mutableStateOf(row.mapping?.personalNotes.orEmpty()) }
+    var manualCorrectionNote by remember(row.installed.packageName) { mutableStateOf(row.mapping?.manualCorrectionNote.orEmpty()) }
     var query by remember { mutableStateOf(row.installed.label) }
     var results by remember { mutableStateOf<List<CatalogGame>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
@@ -9211,6 +9859,15 @@ private fun EditMappingDialog(
                 maxLines = 4,
                 modifier = Modifier.fillMaxWidth(),
             )
+            OutlinedTextField(
+                value = manualCorrectionNote,
+                onValueChange = { manualCorrectionNote = it },
+                label = { Text("Manual correction note") },
+                placeholder = { Text("Why this match/version is correct") },
+                minLines = 1,
+                maxLines = 3,
+                modifier = Modifier.fillMaxWidth(),
+            )
             if (notOnF95) {
                 Spacer(Modifier.height(6.dp))
                 Text(
@@ -9357,7 +10014,7 @@ private fun EditMappingDialog(
                         enabled = row.mapping?.lastSeenVersion != null
                             && row.mapping.lastSeenVersion != row.mapping.acknowledgedVersion
                     ) { Text("Mark installed") }
-                    Button(onClick = { onSave(url, userStatus, personalRating, personalNotes) }) { Text("Save") }
+                    Button(onClick = { onSave(url, userStatus, personalRating, personalNotes, manualCorrectionNote) }) { Text("Save") }
                 }
             } else {
                 Column(
@@ -9387,7 +10044,7 @@ private fun EditMappingDialog(
                             enabled = row.mapping?.lastSeenVersion != null
                                 && row.mapping.lastSeenVersion != row.mapping.acknowledgedVersion
                         ) { Text("Mark installed") }
-                        Button(onClick = { onSave(url, userStatus, personalRating, personalNotes) }) { Text("Save") }
+                        Button(onClick = { onSave(url, userStatus, personalRating, personalNotes, manualCorrectionNote) }) { Text("Save") }
                     }
                 }
             }
