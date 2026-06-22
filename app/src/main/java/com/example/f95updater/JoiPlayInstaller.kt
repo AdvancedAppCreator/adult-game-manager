@@ -3,8 +3,10 @@ package com.example.f95updater
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Hands a file off to JoiPlay's import flow.
@@ -47,10 +49,27 @@ object JoiPlayInstaller {
             AppLog.w("JoiPlayInstall", "Archive extension .$ext — JoiPlay doesn't extract archives")
             return@withContext null
         }
-        val mimeType = context.contentResolver.getType(uri) ?: "*/*"
+        val safeUri = when (uri.scheme) {
+            "file" -> {
+                val path = uri.path ?: return@withContext null
+                runCatching {
+                    FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        File(path),
+                    )
+                }.getOrElse {
+                    AppLog.w("JoiPlayInstall", "Could not create content URI for $uri", it)
+                    return@withContext null
+                }
+            }
+            "content" -> uri
+            else -> uri
+        }
+        val mimeType = context.contentResolver.getType(safeUri) ?: "*/*"
         val intent = Intent(Intent.ACTION_VIEW).apply {
             addCategory(Intent.CATEGORY_DEFAULT)
-            setDataAndType(uri, mimeType)
+            setDataAndType(safeUri, mimeType)
             setPackage("cyou.joiplay.joiplay")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)

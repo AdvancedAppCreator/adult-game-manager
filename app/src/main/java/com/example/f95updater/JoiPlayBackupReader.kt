@@ -14,6 +14,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import net.lingala.zip4j.ZipFile
 import java.io.File
+import java.time.Instant
+import java.time.format.DateTimeParseException
 import java.util.zip.ZipInputStream
 
 private val Context.joiplayBackupStore by preferencesDataStore("joiplay_backup")
@@ -266,7 +268,6 @@ object JoiPlayBackupReader {
     suspend fun asInstalledApps(context: Context): List<InstalledApp> {
         val games = cachedGames(context)
         val settingsJson = cachedSettingsJson(context)?.trim()?.ifBlank { null }
-        val overrides = JoiPlayVersionOverrides.loadAll(context)
         val deleted = deletedIds(context)
         return games.filter { it.id !in deleted }.map { g ->
             // Try to extract a version from title, folder basename, and parent of basename
@@ -282,25 +283,27 @@ object JoiPlayBackupReader {
             val tryParent = folderBasename.lowercase() in setOf("www", "game", "app", "src", "resources")
             val (_, versionFromParent) = if (tryParent) extractVersion(parentBasename) else "" to null
 
-            // Priority: 1) explicit user override (from the conflict dialog), 2) JoiPlay's version field,
-            //           3) title regex, 4) folder regex, 5) parent dir regex.
-            val override = overrides[g.id]?.trim()?.ifBlank { null }
+            // Priority: 1) JoiPlay's version field, 2) title regex, 3) folder regex, 4) parent dir regex.
+            // Manual installed-version overrides are now stored on AppMapping so Android and JoiPlay rows
+            // share the same stale-evidence handling.
             val joiPlayVersion = g.version.trim().ifBlank { null }
-            val version = override ?: joiPlayVersion ?: versionFromTitle ?: versionFromFolder ?: versionFromParent
+            val version = joiPlayVersion ?: versionFromTitle ?: versionFromFolder ?: versionFromParent
             if (version == null) {
                 AppLog.i(
                     "JoiPlayVer",
                     "No version: title='${g.title}' folder='$folderBasename' parent='$parentBasename' type=${g.type}"
                 )
             }
+            val dateEvidence = installedDateEvidence(g, folderPathClean)
             InstalledApp(
                 packageName = "joiplay:${g.id}",
                 label = g.title.ifBlank { folderBasename },
                 versionName = version ?: "",
                 versionCode = 0L,
-                firstInstallTime = g.date,
-                lastUpdateTime = g.date,
+                firstInstallTime = dateEvidence.timeMs,
+                lastUpdateTime = dateEvidence.timeMs,
                 lastUsedTime = 0L,
+                installedDateSource = dateEvidence.source,
                 apkSize = 0L,
                 dataSize = 0L,
                 cacheSize = 0L,
@@ -313,6 +316,86 @@ object JoiPlayBackupReader {
                 joiPlaySettingsJson = settingsJson,
             )
         }
+    }
+
+    private data class DateEvidence(val timeMs: Long, val source: String)
+
+    private fun installedDateEvidence(game: JoiPlayBackupGame, folderPath: String): DateEvidence {
+        val root = File(folderPath)
+        readAgmInstallMarkerDate(root)?.let {
+            return DateEvidence(it, "AGM upgrade marker")
+        }
+        readRenPyBuildDate(root)?.let {
+            return DateEvidence(it, "Ren'Py build_info")
+        }
+        readAgmInstallMarkerArchiveMtime(root)?.let {
+            return DateEvidence(it, "AGM source archive modified time")
+        }
+        readGameKeyFileMtime(root)?.let { (time, source) ->
+            return DateEvidence(time, source)
+        }
+        return DateEvidence(game.date, "JoiPlay backup date")
+    }
+
+    private fun readAgmInstallMarkerDate(root: File): Long? {
+        val marker = File(root, JoiPlayVersionDetector.INSTALL_MARKER_FILE)
+        val json = readJson(marker) ?: return null
+        return parseIsoDate(json.optString("installedAt", ""))
+    }
+
+    private fun readAgmInstallMarkerArchiveMtime(root: File): Long? {
+        val marker = File(root, JoiPlayVersionDetector.INSTALL_MARKER_FILE)
+        val json = readJson(marker) ?: return null
+        return json.optLong("sourceArchiveLastModified", 0L).takeIf { it > 0L }
+    }
+
+    private fun readRenPyBuildDate(root: File): Long? {
+        val file = listOf(
+            File(root, "game/cache/build_info.json"),
+            File(root, "cache/build_info.json"),
+        ).firstOrNull { it.isFile && it.length() in 1..(128 * 1024) } ?: return null
+        val json = readJson(file) ?: return null
+        parseIsoDate(json.optString("build_date", ""))?.let { return it }
+        val timestamp = json.optLong("timestamp", 0L)
+        if (timestamp > 0L) {
+            return if (timestamp < 10_000_000_000L) timestamp * 1000L else timestamp
+        }
+        return null
+    }
+
+    private fun readGameKeyFileMtime(root: File): Pair<Long, String>? {
+        val candidates = listOf(
+            File(root, "package.json") to "package.json modified time",
+            File(root, "data/System.json") to "RPGM System.json modified time",
+            File(root, "www/data/System.json") to "RPGM System.json modified time",
+            File(root, "index.html") to "index.html modified time",
+            root to "folder modified time",
+        )
+        return candidates.firstNotNullOfOrNull { (file, source) ->
+            file.lastModified().takeIf { it > 0L && file.exists() }?.let { it to source }
+        }
+    }
+
+    private fun readJson(file: File): org.json.JSONObject? =
+        runCatching {
+            if (!file.isFile || file.length() <= 0L || file.length() > 128 * 1024L) return@runCatching null
+            org.json.JSONObject(file.readText(Charsets.UTF_8))
+        }.getOrNull()
+
+    private fun parseIsoDate(value: String): Long? {
+        val text = value.trim().ifBlank { return null }
+        return runCatching { Instant.parse(text).toEpochMilli() }
+            .recoverCatching { throwable ->
+                if (throwable is DateTimeParseException) {
+                    java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", java.util.Locale.US)
+                        .parse(text)
+                        ?.time
+                        ?: throw throwable
+                } else {
+                    throw throwable
+                }
+            }
+            .getOrNull()
     }
 
     // Match a version. Order of patterns matters: more specific first.

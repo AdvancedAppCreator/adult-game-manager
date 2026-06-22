@@ -19,6 +19,7 @@ data class InstalledApp(
     val firstInstallTime: Long = 0L,
     val lastUpdateTime: Long = 0L,
     val lastUsedTime: Long = 0L,
+    val installedDateSource: String = "",
     val apkSize: Long = 0L,
     val dataSize: Long = 0L,
     val cacheSize: Long = 0L,
@@ -62,6 +63,28 @@ data class AppMapping(
     val personalNotes: String = "",
     /** Why the user manually chose/corrected this mapping/version. Preserved across auto-refresh. */
     val manualCorrectionNote: String = "",
+    /** User-confirmed installed version. Applies while [manualInstalledVersionFingerprint] still matches the current app evidence. */
+    val manualInstalledVersion: String = "",
+    /** Fingerprint of the installed app evidence at the time [manualInstalledVersion] was set. */
+    val manualInstalledVersionFingerprint: String = "",
+    /** User-confirmed installed date in epoch millis. Applies while [manualInstalledDateFingerprint] still matches the current app evidence. */
+    val manualInstalledDate: Long = 0L,
+    /** Fingerprint of the installed app evidence at the time [manualInstalledDate] was set. */
+    val manualInstalledDateFingerprint: String = "",
+    /** Human-readable source for [manualInstalledDate], e.g. catalog published date or manually picked date. */
+    val manualInstalledDateSource: String = "",
+    /** Local app/JoiPlay identity tokens captured when this mapping was manually chosen. */
+    val manualLocalIdentity: List<String> = emptyList(),
+    /** Source-aware catalog id for manual/external mappings, including negative external ids. */
+    val mappedCatalogId: Int? = null,
+    val mappedCatalogSource: CatalogSource? = null,
+    val mappedCatalogSourceId: String? = null,
+    val mappedCatalogTitle: String = "",
+    val mappedCatalogVersion: String? = null,
+    val mappedCatalogUrl: String? = null,
+    val mappedCatalogUpdatedAt: Long = 0L,
+    val mappedCatalogPublishedAt: Long = 0L,
+    val mappedCatalogModifiedAt: Long = 0L,
 )
 
 @Serializable
@@ -87,6 +110,8 @@ data class CatalogGame(
     val views: Long = 0L,
     val likes: Long = 0L,
     val ts: Long = 0L,
+    val publishedAt: Long = 0L,
+    val modifiedAt: Long = 0L,
     val cover: String? = null,
     val source: CatalogSource = CatalogSource.F95Zone,
     val sourceId: String? = null,

@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -46,6 +47,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
@@ -61,6 +63,7 @@ import org.json.JSONObject
 import org.jsoup.parser.Parser
 import java.io.File
 import java.text.DateFormat
+import java.util.Calendar
 import java.util.Date
 
 class MainActivity : ComponentActivity() {
@@ -70,17 +73,6 @@ class MainActivity : ComponentActivity() {
         AppLog.i("App", "onCreate v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         CrashReporter.install(applicationContext)
         StaticContext.appContext = applicationContext
-        // Allow handing raw file:// URIs to other apps (JoiPlay) when we own the
-        // file by virtue of MANAGE_EXTERNAL_STORAGE. JoiPlay needs the filesystem
-        // path (not a content provider URI) so it can index sibling files in the
-        // game folder. The FileUriExposedException strict-mode check is a target-
-        // sdk 24+ runtime guard; bypassing it is safe here because we're the
-        // exporter and JoiPlay has full-storage access to read whatever we point
-        // at.
-        runCatching {
-            val builder = android.os.StrictMode.VmPolicy.Builder()
-            android.os.StrictMode.setVmPolicy(builder.build())
-        }
         setContent {
             val themeMode by ThemePrefs.observe(applicationContext).collectAsState(initial = AppThemeMode.System)
             val systemDark = isSystemInDarkTheme()
@@ -131,10 +123,161 @@ private fun AppMapping.withPersonalFieldsFrom(existing: AppMapping?): AppMapping
         personalRating = existing.personalRating,
         personalNotes = existing.personalNotes,
         manualCorrectionNote = existing.manualCorrectionNote,
+        manualInstalledVersion = existing.manualInstalledVersion,
+        manualInstalledVersionFingerprint = existing.manualInstalledVersionFingerprint,
+        manualInstalledDate = existing.manualInstalledDate,
+        manualInstalledDateFingerprint = existing.manualInstalledDateFingerprint,
+        manualInstalledDateSource = existing.manualInstalledDateSource,
+        manualLocalIdentity = existing.manualLocalIdentity,
+        mappedCatalogId = existing.mappedCatalogId,
+        mappedCatalogSource = existing.mappedCatalogSource,
+        mappedCatalogSourceId = existing.mappedCatalogSourceId,
+        mappedCatalogTitle = existing.mappedCatalogTitle,
+        mappedCatalogVersion = existing.mappedCatalogVersion,
+        mappedCatalogUrl = existing.mappedCatalogUrl,
+        mappedCatalogUpdatedAt = existing.mappedCatalogUpdatedAt,
+        mappedCatalogPublishedAt = existing.mappedCatalogPublishedAt,
+        mappedCatalogModifiedAt = existing.mappedCatalogModifiedAt,
     )
 
 private fun AppMapping.hasPersonalFields(): Boolean =
-    userStatus != UserGameStatus.None || personalRating != null || personalNotes.isNotBlank() || manualCorrectionNote.isNotBlank()
+    userStatus != UserGameStatus.None ||
+        personalRating != null ||
+        personalNotes.isNotBlank() ||
+        manualCorrectionNote.isNotBlank() ||
+        manualInstalledVersion.isNotBlank() ||
+        manualInstalledDate > 0L
+
+private fun installedVersionFingerprint(app: InstalledApp): String =
+    listOf(
+        app.source.name,
+        app.versionName,
+        app.versionCode.toString(),
+        app.lastUpdateTime.toString(),
+        app.storagePath.orEmpty(),
+        app.storageFolderName.orEmpty(),
+        app.joiPlayGameId.orEmpty(),
+    ).joinToString("|")
+
+private fun effectiveInstalledVersion(app: InstalledApp, mapping: AppMapping?): String {
+    val manual = mapping?.manualInstalledVersion?.trim()?.ifBlank { null } ?: return app.versionName
+    val fingerprint = mapping.manualInstalledVersionFingerprint
+    return if (fingerprint.isBlank() || fingerprint == installedVersionFingerprint(app)) manual else app.versionName
+}
+
+private fun hasActiveManualInstalledVersion(app: InstalledApp, mapping: AppMapping?): Boolean =
+    mapping?.manualInstalledVersion?.isNotBlank() == true &&
+        mapping.manualInstalledVersionFingerprint == installedVersionFingerprint(app)
+
+private fun effectiveInstalledDate(app: InstalledApp, mapping: AppMapping?): Long {
+    val manual = mapping?.manualInstalledDate?.takeIf { it > 0L } ?: return app.firstInstallTime
+    val fingerprint = mapping.manualInstalledDateFingerprint
+    return if (fingerprint.isBlank() || fingerprint == installedVersionFingerprint(app)) manual else app.firstInstallTime
+}
+
+private fun hasActiveManualInstalledDate(app: InstalledApp, mapping: AppMapping?): Boolean =
+    (mapping?.manualInstalledDate ?: 0L) > 0L &&
+        mapping?.manualInstalledDateFingerprint == installedVersionFingerprint(app)
+
+private fun catalogInstalledDateCandidate(game: CatalogGame?): Pair<Long, String>? {
+    val catalogGame = game ?: return null
+    return when {
+        catalogGame.publishedAt > 0L -> catalogGame.publishedAt * 1000L to "catalog published date"
+        catalogGame.modifiedAt > 0L -> catalogGame.modifiedAt * 1000L to "catalog modified date"
+        catalogGame.ts > 0L -> catalogGame.ts * 1000L to "catalog update date"
+        else -> null
+    }
+}
+
+private fun localIdentityTokens(app: InstalledApp): List<String> {
+    val path = app.storagePath?.replace('\\', '/')?.trimEnd('/')
+    val pathBase = path?.substringAfterLast('/')
+    val pathParent = path?.substringBeforeLast('/', missingDelimiterValue = "")?.substringAfterLast('/')
+    val execBase = app.joiPlayExecFile
+        ?.replace('\\', '/')
+        ?.substringAfterLast('/')
+        ?.substringBeforeLast('.', missingDelimiterValue = "")
+    val raw = buildList {
+        add(app.packageName)
+        addAll(catalogMatchLabels(app))
+        add(app.joiPlayGameId)
+        add(pathBase)
+        add(pathParent)
+        add(execBase)
+    }
+    val ignored = setOf("pc", "game", "www", "app", "src", "resources", "joiplay", "android")
+    return raw.mapNotNull { value ->
+        CatalogRepository.normalizeTitle(value.orEmpty()).takeIf { it.length >= 3 && it !in ignored }
+    }.distinct()
+}
+
+private fun AppMapping.withLocalIdentityFrom(app: InstalledApp): AppMapping =
+    copy(manualLocalIdentity = localIdentityTokens(app))
+
+private fun AppMapping.withCatalogSnapshot(game: CatalogGame): AppMapping =
+    copy(
+        mappedCatalogId = game.thread_id,
+        mappedCatalogSource = game.source,
+        mappedCatalogSourceId = game.sourceId,
+        mappedCatalogTitle = game.title,
+        mappedCatalogVersion = game.version,
+        mappedCatalogUrl = game.canonicalUrl,
+        mappedCatalogUpdatedAt = game.ts,
+        mappedCatalogPublishedAt = game.publishedAt,
+        mappedCatalogModifiedAt = game.modifiedAt,
+    )
+
+private fun AppMapping.withExternalSnapshot(result: ExternalMirrorResult): AppMapping =
+    copy(
+        mappedCatalogId = result.threadId ?: result.mirrorUrl.hashCode(),
+        mappedCatalogSource = if (result.sourceHost.equals("adultgameworld.com", ignoreCase = true)) {
+            CatalogSource.AdultGameWorld
+        } else {
+            CatalogSource.F95Zone
+        },
+        mappedCatalogSourceId = result.threadId?.toString(),
+        mappedCatalogTitle = result.title,
+        mappedCatalogVersion = result.version,
+        mappedCatalogUrl = result.mirrorUrl,
+        mappedCatalogUpdatedAt = 0L,
+        mappedCatalogPublishedAt = 0L,
+        mappedCatalogModifiedAt = 0L,
+    )
+
+
+private fun AppMapping.toCatalogSnapshot(): CatalogGame? {
+    val fallbackUrl = f95Url?.takeIf { it.isNotBlank() }
+    val id = mappedCatalogId ?: fallbackUrl?.hashCode() ?: return null
+    val source = mappedCatalogSource
+        ?: if (fallbackUrl?.contains("adultgameworld", ignoreCase = true) == true) {
+            CatalogSource.AdultGameWorld
+        } else {
+            CatalogSource.F95Zone
+        }
+    return CatalogGame(
+        thread_id = id,
+        title = mappedCatalogTitle.ifBlank { fallbackUrl.orEmpty() },
+        version = mappedCatalogVersion ?: lastSeenVersion,
+        source = source,
+        sourceId = mappedCatalogSourceId,
+        sourceUrl = mappedCatalogUrl ?: fallbackUrl,
+        ts = mappedCatalogUpdatedAt,
+        publishedAt = mappedCatalogPublishedAt,
+        modifiedAt = mappedCatalogModifiedAt.takeIf { it > 0L } ?: mappedCatalogUpdatedAt,
+    )
+}
+
+private fun mappedCatalogGame(mapping: AppMapping?, catalogById: Map<Int, CatalogGame>?): CatalogGame? {
+    if (mapping == null) return null
+    val tid = mapping.threadId ?: F95UrlParser.extractThreadId(mapping.f95Url)
+    return tid?.let { catalogById?.get(it) } ?: mapping.toCatalogSnapshot()
+}
+
+private fun threadUpdatedAfterInstall(row: AppRow, catalogById: Map<Int, CatalogGame>?): Boolean {
+    val installedAt = effectiveInstalledDate(row.installed, row.mapping)
+    val updatedAt = mappedCatalogGame(row.mapping, catalogById)?.ts ?: 0L
+    return installedAt > 0L && updatedAt > 0L && updatedAt * 1000L > installedAt
+}
 
 private fun personalRatingLabel(rating: Int?): String =
     rating?.let { "$it/5" } ?: "Unrated"
@@ -461,6 +604,11 @@ private data class AmbiguousCatalogMatch(
     val via: String,
 )
 
+private data class AlreadyMatchedCatalogMatch(
+    val item: AmbiguousCatalogMatch,
+    val keptGame: CatalogGame,
+)
+
 enum class Tab { Installed, Catalog }
 
 private enum class ScreenshotPanel(val title: String) {
@@ -714,6 +862,7 @@ fun InstalledScreen(
     var autoJoiPlaySizeScanStarted by remember { mutableStateOf(false) }
     var hasUsage by remember { mutableStateOf(InstalledAppsScanner.hasUsageAccess(context)) }
     val mappings by repo.mappings.collectAsState(initial = emptyMap())
+    var mappingOverrides by remember { mutableStateOf<Map<String, AppMapping>>(emptyMap()) }
     val hidden by repo.hidden.collectAsState(initial = emptySet())
     val themeMode by ThemePrefs.observe(context.applicationContext).collectAsState(initial = AppThemeMode.System)
     // Reactive app config — UI recomposes on Import / drop-in pickup / clear.
@@ -905,6 +1054,7 @@ fun InstalledScreen(
     val activeFilters = remember { mutableStateListOf<UpdateStatus>().apply { addAll(initialFilters.activeStatuses) } }
     var nameFilter by remember { mutableStateOf(initialFilters.nameFilter) }
     var hasSavesOnlyFilter by remember { mutableStateOf(false) }
+    var threadUpdatedAfterInstallFilter by remember { mutableStateOf(initialFilters.threadUpdatedAfterInstallOnly) }
     var sortMenuOpen by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var libraryLayoutMode by remember { mutableStateOf(initialFilters.layoutMode) }
@@ -1165,10 +1315,17 @@ fun InstalledScreen(
     var refreshCancelledNote by remember { mutableStateOf(false) }
     var ambiguousCatalogMatches by remember { mutableStateOf<List<AmbiguousCatalogMatch>>(emptyList()) }
     var unmappedReviewMatches by remember { mutableStateOf<List<AmbiguousCatalogMatch>>(emptyList()) }
+    var alreadyMatchedReviewMatches by remember { mutableStateOf<List<AlreadyMatchedCatalogMatch>>(emptyList()) }
     var unmappedReviewOpen by remember { mutableStateOf(false) }
     var unmappedReviewLoading by remember { mutableStateOf(false) }
     var bulkFuzzyProgress by remember { mutableStateOf<BulkFuzzyProgress?>(null) }
     var unmatchedFoundPromptOpen by remember { mutableStateOf(false) }
+
+    fun liveMappings(): Map<String, AppMapping> = mappings + mappingOverrides
+
+    fun rememberMapping(mapping: AppMapping) {
+        mappingOverrides = mappingOverrides + (mapping.packageName to mapping)
+    }
 
     fun currentUnmappedRows(): List<AppRow> = apps.mapNotNull { app ->
         val m = mappings[app.packageName]
@@ -1217,6 +1374,57 @@ fun InstalledScreen(
         }
     }
 
+    fun previouslyMappedCandidate(candidates: List<CatalogGame>, extraMappings: Collection<AppMapping?> = emptyList()): CatalogGame? {
+        if (candidates.isEmpty()) return null
+        val knownMappings = liveMappings().values + extraMappings.filterNotNull()
+        val mappedThreadIds = knownMappings.mapNotNull { m ->
+            m.threadId ?: F95UrlParser.extractThreadId(m.f95Url)
+        }.toSet()
+        val mappedUrls = knownMappings.mapNotNull { it.f95Url?.trim()?.takeIf { url -> url.isNotBlank() } }.toSet()
+        return candidates.firstOrNull { game ->
+            game.f95ThreadIdOrNull?.let { it in mappedThreadIds } == true ||
+                game.canonicalUrl in mappedUrls
+        }
+    }
+
+    fun previouslyMappedByLocalIdentity(
+        row: AppRow,
+        byId: Map<Int, CatalogGame>,
+        extraMappings: Collection<AppMapping?> = emptyList(),
+    ): CatalogGame? {
+        val tokens = localIdentityTokens(row.installed).toSet()
+        if (tokens.isEmpty()) return null
+        val knownMappings = (liveMappings().values + extraMappings.filterNotNull()).filter { !it.f95Url.isNullOrBlank() }
+        val matched = knownMappings.firstOrNull { mapping ->
+            mapping.manualLocalIdentity.any { it in tokens }
+        } ?: knownMappings.firstOrNull { mapping ->
+            if (mapping.manualLocalIdentity.isNotEmpty()) return@firstOrNull false
+            val legacyToken = CatalogRepository.normalizeTitle(mapping.packageName.removePrefix("joiplay:"))
+            legacyToken.length >= 4 && tokens.any { token ->
+                token == legacyToken ||
+                    token.contains(legacyToken) ||
+                    legacyToken.contains(token) ||
+                    token.take(10) == legacyToken.take(10)
+            }
+        } ?: return null
+        val tid = matched.threadId ?: F95UrlParser.extractThreadId(matched.f95Url)
+        val game = tid?.let { byId[it] } ?: matched.toCatalogSnapshot() ?: return null
+        val updated = matched.takeIf { it.manualLocalIdentity.isEmpty() }
+            ?.copy(manualLocalIdentity = tokens.toList())
+        if (updated != null) {
+            rememberMapping(updated)
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                runCatching { repo.upsert(updated) }
+            }
+        }
+        AppLog.i(
+            "CatalogRefresh",
+            "ALREADY_MATCHED local-identity ${catalogMatchLogContext(row.installed, catalogMatchLabels(row.installed))} " +
+                "-> tid=${game.thread_id} title='${game.title}' tokens=${tokens.intersect(matched.manualLocalIdentity.toSet()).ifEmpty { tokens }}"
+        )
+        return game
+    }
+
     // Reusable catalog refresh — auto-matches a row set against the loaded catalog.
     // Returns Pair(matched, unmatched). Caller is responsible for snackbar messaging.
     // Updates [refreshProgress] for the foreground dialog; honors [refreshCancelled].
@@ -1231,13 +1439,14 @@ fun InstalledScreen(
             var matched = 0
             var unmatched = 0
             val ambiguous = mutableListOf<AmbiguousCatalogMatch>()
+            val alreadyMatched = mutableListOf<AlreadyMatchedCatalogMatch>()
             val startMs = refreshProgress!!.startedAtMs
             for ((idx, row) in targetRows.withIndex()) {
                 if (refreshCancelled) {
                     AppLog.i("CatalogRefresh", "Cancelled at ${idx}/${targetRows.size}")
                     break
                 }
-                val current = mappings[row.installed.packageName]
+                val current = liveMappings()[row.installed.packageName] ?: row.mapping
                 if (current?.notOnF95 == true) {
                     unmatched++
                     refreshProgress = RefreshProgress(idx + 1, targetRows.size, matched, startMs)
@@ -1256,6 +1465,24 @@ fun InstalledScreen(
                 val matchContext = catalogMatchLogContext(row.installed, labels)
                 val allowAcronym = allowCatalogAcronymMatch(row.installed, labels)
                 val norm = CatalogRepository.normalizeTitle(labels.firstOrNull() ?: row.installed.label)
+                if (!current?.f95Url.isNullOrBlank() && !overwriteManualMatches) {
+                    val preserved = tidFromMapping?.let { byId[it] } ?: tidFromUrl?.let { byId[it] }
+                    matched++
+                    AppLog.i(
+                        "CatalogRefresh",
+                        "PRESERVE mapped $matchContext -> url=${current?.f95Url} " +
+                            "catalog=${preserved?.thread_id ?: "missing"} v=${preserved?.version}"
+                    )
+                    repo.upsert(
+                        current!!.copy(
+                            lastSeenVersion = preserved?.version ?: current.lastSeenVersion,
+                            lastChecked = System.currentTimeMillis(),
+                            threadId = current.threadId ?: tidFromUrl,
+                        )
+                    )
+                    refreshProgress = RefreshProgress(idx + 1, targetRows.size, matched, startMs)
+                    continue
+                }
                 var via = ""
                 var candidate = if (!isManualMapping) tidFromMapping?.let { byId[it] }?.also { via = "tid-mapping" } else null
                 if (candidate == null) {
@@ -1302,27 +1529,34 @@ fun InstalledScreen(
                             acknowledgedVersion = current?.acknowledgedVersion,
                             threadId = candidate.f95ThreadIdOrNull,
                             matchSource = "catalog-auto:$via",
-                        ).withPersonalFieldsFrom(current)
+                        ).withPersonalFieldsFrom(current).withCatalogSnapshot(candidate)
                     )
                 } else {
                     val ambiguousMatch = catalog.ambiguousTitleMatch(labels, allowAcronym)
                     if (ambiguousMatch != null) {
-                        ambiguous += AmbiguousCatalogMatch(
+                        val item = AmbiguousCatalogMatch(
                             row = row,
                             candidates = ambiguousMatch.candidates.take(12),
                             via = ambiguousMatch.via,
                         )
+                        val prior = previouslyMappedCandidate(item.candidates, targetRows.map { it.mapping })
+                            ?: previouslyMappedByLocalIdentity(row, byId, targetRows.map { it.mapping })
+                        if (prior != null) alreadyMatched += AlreadyMatchedCatalogMatch(item, prior)
+                        else ambiguous += item
                         AppLog.i(
                             "CatalogRefresh",
                             "AMBIGUOUS $matchContext via=${ambiguousMatch.via}: " +
                                 ambiguousMatch.candidates.take(12).joinToString { "${it.thread_id} '${it.title}'" }
                         )
                     } else {
-                        ambiguous += AmbiguousCatalogMatch(
+                        val item = AmbiguousCatalogMatch(
                             row = row,
                             candidates = emptyList(),
                             via = "none",
                         )
+                        val prior = previouslyMappedByLocalIdentity(row, byId, targetRows.map { it.mapping })
+                        if (prior != null) alreadyMatched += AlreadyMatchedCatalogMatch(item, prior)
+                        else ambiguous += item
                     }
                     unmatched++
                     AppLog.i("CatalogRefresh", "NO MATCH $matchContext primaryNorm='$norm'")
@@ -1331,8 +1565,9 @@ fun InstalledScreen(
             }
             ambiguousCatalogMatches = emptyList()
             unmappedReviewMatches = ambiguous
-            unmatchedFoundPromptOpen = ambiguous.isNotEmpty() && !refreshCancelled
-            AppLog.i("CatalogRefresh", "Done: matched=$matched unmatched=$unmatched ambiguous=${ambiguous.size} cancelled=$refreshCancelled")
+            alreadyMatchedReviewMatches = alreadyMatched
+            unmatchedFoundPromptOpen = (ambiguous.isNotEmpty() || alreadyMatched.isNotEmpty()) && !refreshCancelled
+            AppLog.i("CatalogRefresh", "Done: matched=$matched unmatched=$unmatched ambiguous=${ambiguous.size} alreadyMatched=${alreadyMatched.size} cancelled=$refreshCancelled")
             matched to unmatched
         } catch (t: Throwable) {
             AppLog.e("CatalogRefresh", "Failed", t)
@@ -1390,6 +1625,32 @@ fun InstalledScreen(
         }
     }
 
+    suspend fun setManualInstalledVersion(row: AppRow, version: String) {
+        val cleaned = version.trim()
+        if (cleaned.isBlank()) return
+        val existing = repo.get()[row.installed.packageName]
+        val updated = (existing ?: AppMapping(packageName = row.installed.packageName)).copy(
+            manualInstalledVersion = cleaned,
+            manualInstalledVersionFingerprint = installedVersionFingerprint(row.installed),
+        )
+        rememberMapping(updated)
+        repo.upsert(updated)
+        snackbarMsg = "Set installed version $cleaned for ${row.installed.label}"
+    }
+
+    suspend fun setManualInstalledDate(row: AppRow, dateMs: Long, source: String) {
+        if (dateMs <= 0L) return
+        val existing = repo.get()[row.installed.packageName]
+        val updated = (existing ?: AppMapping(packageName = row.installed.packageName)).copy(
+            manualInstalledDate = dateMs,
+            manualInstalledDateFingerprint = installedVersionFingerprint(row.installed),
+            manualInstalledDateSource = source,
+        )
+        rememberMapping(updated)
+        repo.upsert(updated)
+        snackbarMsg = "Set installed date ${fmtDate(dateMs)} for ${row.installed.label}"
+    }
+
     fun startMappingBackupImport(uri: Uri) {
         scope.launch {
             runCatching {
@@ -1437,7 +1698,7 @@ fun InstalledScreen(
                         val joiplayPackages = joiplay.map { it.packageName }.toSet()
                         val joiplayRows = (android + joiplay).filter { it.packageName in joiplayPackages }
                             .map { app ->
-                                val m = repo.get()[app.packageName]
+                                val m = liveMappings()[app.packageName] ?: repo.get()[app.packageName]
                                 AppRow(app, m, UpdateStatus.Unknown)
                             }
                         snackbarMsg = "Imported $count games; matching to catalog…"
@@ -1890,7 +2151,7 @@ fun InstalledScreen(
 
     // Persist filter state whenever any of these change.
     LaunchedEffect(sortKey, sortDesc, nameFilter, sourceFilter, showHidden,
-        manualOnlyFilter, libraryLayoutMode, activeFilters.toList()) {
+        manualOnlyFilter, threadUpdatedAfterInstallFilter, libraryLayoutMode, activeFilters.toList()) {
         FilterPrefs.save(
             context.applicationContext,
             FilterPrefs.State(
@@ -1902,6 +2163,7 @@ fun InstalledScreen(
                 activeTags = parseTagFilters(nameFilter),
                 showHidden = showHidden,
                 manualOnly = manualOnlyFilter,
+                threadUpdatedAfterInstallOnly = threadUpdatedAfterInstallFilter,
                 layoutMode = libraryLayoutMode,
             )
         )
@@ -1914,6 +2176,7 @@ fun InstalledScreen(
 
     val rows: List<AppRow> = remember(visibleApps, mappings, sortKey, sortDesc,
         activeFilters.toList(), nameFilter, sourceFilter, manualOnlyFilter, hasSavesOnlyFilter,
+        threadUpdatedAfterInstallFilter,
         renPySaveAssociations, rpgmSaveAssociations, catalogById, catalogLabels, joiPlaySizeInfo) {
         val bySource = if (sourceFilter == null) visibleApps else visibleApps.filter { it.source == sourceFilter }
 
@@ -1942,7 +2205,7 @@ fun InstalledScreen(
                 m == null || m.f95Url.isNullOrBlank() -> UpdateStatus.NotMapped
                 m.lastSeenVersion == null -> UpdateStatus.Unknown
                 m.acknowledgedVersion != null && m.acknowledgedVersion == m.lastSeenVersion -> UpdateStatus.UpToDate
-                VersionCompare.matchesInstalled(m.lastSeenVersion, app.versionName) -> UpdateStatus.UpToDate
+                VersionCompare.matchesInstalled(m.lastSeenVersion, effectiveInstalledVersion(app, m)) -> UpdateStatus.UpToDate
                 else -> UpdateStatus.UpdateAvailable
             }
             AppRow(app, m, status)
@@ -1951,18 +2214,19 @@ fun InstalledScreen(
             else joined.filter { it.status in activeFilters }
         val filteredByManual = if (!manualOnlyFilter) filteredByStatus
             else filteredByStatus.filter { it.mapping?.matchSource?.startsWith("manual") == true }
-        val filtered = if (!hasSavesOnlyFilter) filteredByManual
-            else filteredByManual.filter {
+        val filteredByThreadUpdated = if (!threadUpdatedAfterInstallFilter) filteredByManual
+            else filteredByManual.filter { threadUpdatedAfterInstall(it, catalogById) }
+        val filtered = if (!hasSavesOnlyFilter) filteredByThreadUpdated
+            else filteredByThreadUpdated.filter {
                 renPySaveAssociations[it.installed.packageName].orEmpty().isNotEmpty() ||
                     rpgmSaveAssociations[it.installed.packageName].orEmpty().isNotEmpty()
             }
         val sorted = when (sortKey) {
             SortKey.Name -> filtered.sortedBy { it.installed.label.lowercase() }
-            SortKey.Installed -> filtered.sortedBy { it.installed.firstInstallTime }
+            SortKey.Installed -> filtered.sortedBy { effectiveInstalledDate(it.installed, it.mapping) }
             SortKey.LastUsed -> filtered.sortedBy { it.installed.lastUsedTime }
             SortKey.ThreadUpdated -> filtered.sortedBy { row ->
-                val tid = row.mapping?.threadId ?: F95UrlParser.extractThreadId(row.mapping?.f95Url)
-                tid?.let { catalogById?.get(it)?.ts } ?: 0L
+                mappedCatalogGame(row.mapping, catalogById)?.ts ?: 0L
             }
             SortKey.Size -> filtered.sortedBy { row ->
                 effectiveInstalledSize(row.installed, joiPlaySizeKey(row.installed)?.let { joiPlaySizeInfo[it] })
@@ -2025,6 +2289,8 @@ fun InstalledScreen(
     var joiPlayVersionDialog by remember {
         mutableStateOf<Triple<AppRow, List<VersionCandidate>, (() -> Unit)>?>(null)
     }
+    var manualVersionTarget by remember { mutableStateOf<AppRow?>(null) }
+    var manualDateTarget by remember { mutableStateOf<Pair<AppRow, CatalogGame?>?>(null) }
     var aboutOpen by remember { mutableStateOf(false) }
     var joiPlayInstalled by remember { mutableStateOf(false) }
     var autoSyncStatus by remember { mutableStateOf<String?>(null) }
@@ -2529,7 +2795,13 @@ fun InstalledScreen(
                                         scope.launch {
                                             try {
                                                 val items = buildCurrentUnmappedReviewItems()
-                                                unmappedReviewMatches = items
+                                                val already = items.mapNotNull { item ->
+                                                    previouslyMappedCandidate(item.candidates)?.let { AlreadyMatchedCatalogMatch(item, it) }
+                                                }
+                                                alreadyMatchedReviewMatches = already
+                                                unmappedReviewMatches = items.filterNot { item ->
+                                                    already.any { it.item.row.installed.packageName == item.row.installed.packageName }
+                                                }
                                                 unmappedReviewOpen = true
                                             } finally {
                                                 unmappedReviewLoading = false
@@ -3202,22 +3474,27 @@ fun InstalledScreen(
             if (compactHeight) {
                 CompactInstalledFilterRow(
                     active = activeFilters,
-                    manualOnly = manualOnlyFilter,
-                    onManualOnlyChange = { manualOnlyFilter = it },
-                    hasSavesOnly = hasSavesOnlyFilter,
-                    onHasSavesOnlyChange = { hasSavesOnlyFilter = it },
                     sourceFilter = sourceFilter,
                     onSourceChange = { sourceFilter = it },
+                    manualOnly = manualOnlyFilter,
+                    onManualOnlyChange = { manualOnlyFilter = it },
+                    threadUpdatedAfterInstall = threadUpdatedAfterInstallFilter,
+                    onThreadUpdatedAfterInstallChange = { threadUpdatedAfterInstallFilter = it },
+                    hasSavesOnly = hasSavesOnlyFilter,
+                    onHasSavesOnlyChange = { hasSavesOnlyFilter = it },
                 )
             } else {
                 FilterBar(
                     active = activeFilters,
+                    sourceFilter = sourceFilter,
+                    onSourceChange = { sourceFilter = it },
                     manualOnly = manualOnlyFilter,
                     onManualOnlyChange = { manualOnlyFilter = it },
+                    threadUpdatedAfterInstall = threadUpdatedAfterInstallFilter,
+                    onThreadUpdatedAfterInstallChange = { threadUpdatedAfterInstallFilter = it },
                     hasSavesOnly = hasSavesOnlyFilter,
                     onHasSavesOnlyChange = { hasSavesOnlyFilter = it },
                 )
-                SourceFilterRow(sourceFilter = sourceFilter, onChange = { sourceFilter = it })
             }
             HorizontalDivider()
             if (apkInstalling) {
@@ -3342,9 +3619,8 @@ fun InstalledScreen(
                     gridItems(rows, key = { it.installed.packageName }) { row ->
                         val pkg = row.installed.packageName
                         val isExpanded = pkg in expanded
-                        val rowThreadId = row.mapping?.threadId ?: F95UrlParser.extractThreadId(row.mapping?.f95Url)
-                        val catalogGame: CatalogGame? = remember(catalogById, rowThreadId) {
-                            rowThreadId?.let { catalogById?.get(it) }
+                        val catalogGame: CatalogGame? = remember(catalogById, row.mapping) {
+                            mappedCatalogGame(row.mapping, catalogById)
                         }
                         val coverUrl = catalogGame?.cover?.takeIf { it.isNotBlank() }
                         NiceGameCard(
@@ -3375,6 +3651,8 @@ fun InstalledScreen(
                             onShowCover = { fullSizeImageUrl = it },
                             onSnack = { snackbarMsg = it },
                             onEdit = { dialogApp = row },
+                            onSetInstalledVersion = { manualVersionTarget = row },
+                            onSetInstalledDate = { manualDateTarget = row to catalogGame },
                             onOpenRenPySaves = { renPySaveEditorTarget = row },
                             onAddRenPySaveFolder = { renPyAddFolderTarget = row },
                             onOpenRpgmSaves = { rpgmSaveViewerTarget = row },
@@ -3428,10 +3706,9 @@ fun InstalledScreen(
                                         }
                                         joiPlayDetecting = null
                                         val distinct = candidates.map { it.version }.distinct()
-                                        val gameId = row.installed.joiPlayGameId
                                         suspend fun applyAndCheckSource(chosen: String?) {
-                                            if (chosen != null && gameId != null) {
-                                                JoiPlayVersionOverrides.set(context.applicationContext, gameId, chosen)
+                                            if (chosen != null) {
+                                                setManualInstalledVersion(row, chosen)
                                                 val android = InstalledAppsScanner.scan(context)
                                                 val backup = JoiPlayBackupReader.asInstalledApps(context.applicationContext)
                                                 val folder = JoiPlayScanner.scan(context.applicationContext)
@@ -3463,7 +3740,7 @@ fun InstalledScreen(
                                         }
                                         when {
                                             candidates.isEmpty() -> {
-                                                snackbarMsg = "No version detected. Tap 'Edit URL' to set manually."
+                                                snackbarMsg = "No version detected. Use Set installed version to enter it manually."
                                                 applyAndCheckSource(null)
                                             }
                                             distinct.size == 1 -> applyAndCheckSource(distinct[0])
@@ -3551,10 +3828,8 @@ fun InstalledScreen(
                     val pkg = row.installed.packageName
                     val isExpanded = pkg in expanded
                     // Resolve catalog match synchronously from the pre-loaded byId map (no per-row suspend).
-                    val rowThreadId = row.mapping?.threadId
-                        ?: F95UrlParser.extractThreadId(row.mapping?.f95Url)
-                    val catalogGame: CatalogGame? = remember(catalogById, rowThreadId) {
-                        rowThreadId?.let { catalogById?.get(it) }
+                    val catalogGame: CatalogGame? = remember(catalogById, row.mapping) {
+                        mappedCatalogGame(row.mapping, catalogById)
                     }
                     val coverUrl: String? = catalogGame?.cover?.takeIf { it.isNotBlank() }
                     AppRowCard(
@@ -3585,6 +3860,8 @@ fun InstalledScreen(
                         onShowCover = { fullSizeImageUrl = it },
                         onSnack = { snackbarMsg = it },
                         onEdit = { dialogApp = row },
+                        onSetInstalledVersion = { manualVersionTarget = row },
+                        onSetInstalledDate = { manualDateTarget = row to catalogGame },
                         onOpenRenPySaves = { renPySaveEditorTarget = row },
                         onAddRenPySaveFolder = { renPyAddFolderTarget = row },
                         onOpenRpgmSaves = { rpgmSaveViewerTarget = row },
@@ -3643,10 +3920,9 @@ fun InstalledScreen(
                                     joiPlayDetecting = null
 
                                     val distinct = candidates.map { it.version }.distinct()
-                                    val gameId = row.installed.joiPlayGameId
                                     suspend fun applyAndCheckSource(chosen: String?) {
-                                        if (chosen != null && gameId != null) {
-                                            JoiPlayVersionOverrides.set(context.applicationContext, gameId, chosen)
+                                        if (chosen != null) {
+                                            setManualInstalledVersion(row, chosen)
                                             // Force the InstalledApp list to refresh with the new override.
                                             val android = InstalledAppsScanner.scan(context)
                                             val backup = JoiPlayBackupReader.asInstalledApps(context.applicationContext)
@@ -3681,7 +3957,7 @@ fun InstalledScreen(
 
                                     when {
                                         candidates.isEmpty() -> {
-                                            snackbarMsg = "No version detected. Tap 'Edit URL' to set manually."
+                                            snackbarMsg = "No version detected. Use Set installed version to enter it manually."
                                             applyAndCheckSource(null)
                                         }
                                         distinct.size == 1 -> {
@@ -3757,30 +4033,30 @@ fun InstalledScreen(
             onSave = { newUrl, userStatus, personalRating, personalNotes, correctionNote ->
                 scope.launch {
                     val tid = F95UrlParser.extractThreadId(newUrl)
-                    repo.upsert(
-                        AppMapping(
-                            packageName = row.installed.packageName,
-                            f95Url = newUrl.ifBlank { null },
-                            lastSeenVersion = row.mapping?.lastSeenVersion,
-                            lastChecked = row.mapping?.lastChecked ?: 0L,
-                            acknowledgedVersion = row.mapping?.acknowledgedVersion,
-                            threadId = tid ?: row.mapping?.threadId,
-                            notOnF95 = false,
-                            matchSource = "manual",
-                            userStatus = userStatus,
-                            personalRating = personalRating,
-                            personalNotes = personalNotes.trim(),
-                            manualCorrectionNote = correctionNote.trim(),
-                        )
-                    )
+                    val mapping = AppMapping(
+                        packageName = row.installed.packageName,
+                        f95Url = newUrl.ifBlank { null },
+                        lastSeenVersion = row.mapping?.lastSeenVersion,
+                        lastChecked = row.mapping?.lastChecked ?: 0L,
+                        acknowledgedVersion = row.mapping?.acknowledgedVersion,
+                        threadId = tid ?: row.mapping?.threadId,
+                        notOnF95 = false,
+                        matchSource = "manual",
+                        userStatus = userStatus,
+                        personalRating = personalRating,
+                        personalNotes = personalNotes.trim(),
+                        manualCorrectionNote = correctionNote.trim(),
+                    ).withLocalIdentityFrom(row.installed)
+                    AppLog.i("ManualMapping", "SAVE ${catalogMatchLogContext(row.installed, catalogMatchLabels(row.installed))} url=${mapping.f95Url} thread=${mapping.threadId} identity=${mapping.manualLocalIdentity}")
+                    rememberMapping(mapping)
+                    repo.upsert(mapping)
                     dialogApp = null
                     afterDialogMapping(row.installed.packageName)
                 }
             },
             onPickCatalog = { game ->
                 scope.launch {
-                    repo.upsert(
-                        AppMapping(
+                    val mapping = AppMapping(
                             packageName = row.installed.packageName,
                             f95Url = game.canonicalUrl,
                             lastSeenVersion = game.version,
@@ -3789,8 +4065,10 @@ fun InstalledScreen(
                             threadId = game.f95ThreadIdOrNull,
                             notOnF95 = false,
                             matchSource = "manual",
-                        ).withPersonalFieldsFrom(row.mapping)
-                    )
+                        ).withPersonalFieldsFrom(row.mapping).withLocalIdentityFrom(row.installed).withCatalogSnapshot(game)
+                    AppLog.i("ManualMapping", "PICK ${catalogMatchLogContext(row.installed, catalogMatchLabels(row.installed))} -> tid=${game.thread_id} title='${game.title}' identity=${mapping.manualLocalIdentity}")
+                    rememberMapping(mapping)
+                    repo.upsert(mapping)
                     snackbarMsg = "Mapped to '${game.title}'"
                     dialogApp = null
                     afterDialogMapping(row.installed.packageName)
@@ -3798,8 +4076,7 @@ fun InstalledScreen(
             },
             onPickExternal = { external ->
                 scope.launch {
-                    repo.upsert(
-                        AppMapping(
+                    val mapping = AppMapping(
                             packageName = row.installed.packageName,
                             f95Url = external.mirrorUrl,
                             lastSeenVersion = external.version ?: row.mapping?.lastSeenVersion,
@@ -3808,8 +4085,10 @@ fun InstalledScreen(
                             threadId = if (external.sourceHost == "f95zone.to") external.threadId else null,
                             notOnF95 = false,
                             matchSource = "manual-external:${external.sourceHost.ifBlank { "external" }}",
-                        ).withPersonalFieldsFrom(row.mapping)
-                    )
+                        ).withPersonalFieldsFrom(row.mapping).withLocalIdentityFrom(row.installed).withExternalSnapshot(external)
+                    AppLog.i("ManualMapping", "PICK_EXTERNAL ${catalogMatchLogContext(row.installed, catalogMatchLabels(row.installed))} -> ${external.sourceHost}:${external.threadId} '${external.title}' identity=${mapping.manualLocalIdentity}")
+                    rememberMapping(mapping)
+                    repo.upsert(mapping)
                     snackbarMsg = "Mapped to external source: ${external.title}"
                     dialogApp = null
                     afterDialogMapping(row.installed.packageName)
@@ -3886,8 +4165,7 @@ fun InstalledScreen(
             onPick = { game ->
                 scope.launch {
                     val row = ambiguous.row
-                    repo.upsert(
-                        AppMapping(
+                    val mapping = AppMapping(
                             packageName = row.installed.packageName,
                             f95Url = game.canonicalUrl,
                             lastSeenVersion = game.version,
@@ -3896,8 +4174,10 @@ fun InstalledScreen(
                             threadId = game.f95ThreadIdOrNull,
                             notOnF95 = false,
                             matchSource = "manual-ambiguous:${ambiguous.via}",
-                        ).withPersonalFieldsFrom(row.mapping)
-                    )
+                        ).withPersonalFieldsFrom(row.mapping).withLocalIdentityFrom(row.installed).withCatalogSnapshot(game)
+                    AppLog.i("ManualMapping", "PICK_AMBIGUOUS ${catalogMatchLogContext(row.installed, catalogMatchLabels(row.installed))} -> tid=${game.thread_id} title='${game.title}' identity=${mapping.manualLocalIdentity}")
+                    rememberMapping(mapping)
+                    repo.upsert(mapping)
                     snackbarMsg = "Mapped ${row.installed.label} to '${game.title}'"
                     ambiguousCatalogMatches = ambiguousCatalogMatches.drop(1)
                 }
@@ -3929,12 +4209,20 @@ fun InstalledScreen(
     if (unmappedReviewOpen) {
         UnmappedReviewDialog(
             items = unmappedReviewMatches,
+            alreadyMatchedItems = alreadyMatchedReviewMatches,
             onDismiss = { unmappedReviewOpen = false },
-            onPick = { item, game ->
+            onDismissAlreadyMatched = {
+                alreadyMatchedReviewMatches = emptyList()
+                if (unmappedReviewMatches.isEmpty()) unmappedReviewOpen = false
+                snackbarMsg = "Dismissed already matched games from this review"
+            },
+            onKeepAlreadyMatched = {
                 scope.launch {
-                    val row = item.row
-                    repo.upsert(
-                        AppMapping(
+                    val kept = alreadyMatchedReviewMatches
+                    kept.forEach { already ->
+                        val row = already.item.row
+                        val game = already.keptGame
+                        val mapping = AppMapping(
                             packageName = row.installed.packageName,
                             f95Url = game.canonicalUrl,
                             lastSeenVersion = game.version,
@@ -3942,29 +4230,54 @@ fun InstalledScreen(
                             acknowledgedVersion = row.mapping?.acknowledgedVersion,
                             threadId = game.f95ThreadIdOrNull,
                             notOnF95 = false,
-                            matchSource = "manual",
-                        ).withPersonalFieldsFrom(row.mapping)
-                    )
+                            matchSource = "manual:previous",
+                        ).withPersonalFieldsFrom(row.mapping).withLocalIdentityFrom(row.installed).withCatalogSnapshot(game)
+                        rememberMapping(mapping)
+                        repo.upsert(mapping)
+                    }
+                    alreadyMatchedReviewMatches = emptyList()
+                    if (unmappedReviewMatches.isEmpty()) unmappedReviewOpen = false
+                    snackbarMsg = "Kept ${kept.size} already matched game${if (kept.size == 1) "" else "s"}"
+                }
+            },
+            onPick = { item, game ->
+                scope.launch {
+                    val row = item.row
+                    val mapping = AppMapping(
+                        packageName = row.installed.packageName,
+                        f95Url = game.canonicalUrl,
+                        lastSeenVersion = game.version,
+                        lastChecked = System.currentTimeMillis(),
+                        acknowledgedVersion = row.mapping?.acknowledgedVersion,
+                        threadId = game.f95ThreadIdOrNull,
+                        notOnF95 = false,
+                        matchSource = "manual",
+                    ).withPersonalFieldsFrom(row.mapping).withLocalIdentityFrom(row.installed).withCatalogSnapshot(game)
+                    AppLog.i("ManualMapping", "REVIEW_PICK ${catalogMatchLogContext(row.installed, catalogMatchLabels(row.installed))} -> tid=${game.thread_id} title='${game.title}' identity=${mapping.manualLocalIdentity}")
+                    rememberMapping(mapping)
+                    repo.upsert(mapping)
                     unmappedReviewMatches = unmappedReviewMatches.filterNot { it.row.installed.packageName == row.installed.packageName }
+                    alreadyMatchedReviewMatches = alreadyMatchedReviewMatches.filterNot { it.item.row.installed.packageName == row.installed.packageName }
                     snackbarMsg = "Mapped ${row.installed.label} to '${game.title}'"
                 }
             },
             onNone = { item ->
                 scope.launch {
                     val row = item.row
-                    repo.upsert(
-                        AppMapping(
-                            packageName = row.installed.packageName,
-                            f95Url = null,
-                            lastSeenVersion = null,
-                            lastChecked = System.currentTimeMillis(),
-                            acknowledgedVersion = null,
-                            threadId = null,
-                            notOnF95 = true,
-                            matchSource = "manual",
-                        ).withPersonalFieldsFrom(row.mapping)
-                    )
+                    val mapping = AppMapping(
+                        packageName = row.installed.packageName,
+                        f95Url = null,
+                        lastSeenVersion = null,
+                        lastChecked = System.currentTimeMillis(),
+                        acknowledgedVersion = null,
+                        threadId = null,
+                        notOnF95 = true,
+                        matchSource = "manual",
+                    ).withPersonalFieldsFrom(row.mapping)
+                    rememberMapping(mapping)
+                    repo.upsert(mapping)
                     unmappedReviewMatches = unmappedReviewMatches.filterNot { it.row.installed.packageName == row.installed.packageName }
+                    alreadyMatchedReviewMatches = alreadyMatchedReviewMatches.filterNot { it.item.row.installed.packageName == row.installed.packageName }
                     snackbarMsg = "Marked ${row.installed.label} as not in catalog"
                 }
             },
@@ -4082,8 +4395,15 @@ fun InstalledScreen(
             title = { Text("Unmatched games found") },
             text = {
                 Text(
-                    "${unmappedReviewMatches.size} entries could not be matched automatically. " +
-                        "Open the review window to search, fuzzy find, or mark them as not in the catalog?"
+                    buildString {
+                        if (alreadyMatchedReviewMatches.isNotEmpty()) {
+                            append("${alreadyMatchedReviewMatches.size} entries match games you already mapped before. ")
+                        }
+                        if (unmappedReviewMatches.isNotEmpty()) {
+                            append("${unmappedReviewMatches.size} entries still need review. ")
+                        }
+                        append("Open the review window to keep already matched games or handle new/unmatched ones?")
+                    }
                 )
             },
             confirmButton = {
@@ -4516,21 +4836,17 @@ fun InstalledScreen(
                     candidates.forEach { c ->
                         TextButton(
                             onClick = {
-                                val gameId = row.installed.joiPlayGameId
                                 joiPlayVersionDialog = null
-                                if (gameId != null) {
-                                    scope.launch {
-                                        JoiPlayVersionOverrides.set(context.applicationContext, gameId, c.version)
-                                        val android = InstalledAppsScanner.scan(context)
-                                        val backup = JoiPlayBackupReader.asInstalledApps(context.applicationContext)
-                                        val folder = JoiPlayScanner.scan(context.applicationContext)
-                                        apps = (android + mergeJoiPlaySources(backup, folder))
-                                            .sortedBy { it.label.lowercase() }
-                                        // Now run catalog update check.
-                                        if (!row.mapping?.f95Url.isNullOrBlank()) {
-                                            checkOne(row, scraper, repo)
-                                        }
-                                        snackbarMsg = "Set version ${c.version} for ${row.installed.label}"
+                                scope.launch {
+                                    setManualInstalledVersion(row, c.version)
+                                    val android = InstalledAppsScanner.scan(context)
+                                    val backup = JoiPlayBackupReader.asInstalledApps(context.applicationContext)
+                                    val folder = JoiPlayScanner.scan(context.applicationContext)
+                                    apps = (android + mergeJoiPlaySources(backup, folder))
+                                        .sortedBy { it.label.lowercase() }
+                                    // Now run catalog update check.
+                                    if (!row.mapping?.f95Url.isNullOrBlank()) {
+                                        checkOne(row, scraper, repo)
                                     }
                                 }
                             },
@@ -4557,6 +4873,169 @@ fun InstalledScreen(
             confirmButton = {
                 TextButton(onClick = { joiPlayVersionDialog = null }) { Text("Cancel") }
             }
+        )
+    }
+
+    manualVersionTarget?.let { row ->
+        val catalogVersion = row.mapping?.lastSeenVersion?.trim()?.ifBlank { null }
+        var versionText by remember(row.installed.packageName, row.mapping?.manualInstalledVersion) {
+            mutableStateOf(
+                row.mapping?.manualInstalledVersion
+                    ?.takeIf { hasActiveManualInstalledVersion(row.installed, row.mapping) }
+                    ?: effectiveInstalledVersion(row.installed, row.mapping)
+            )
+        }
+        AlertDialog(
+            onDismissRequest = { manualVersionTarget = null },
+            title = { Text("Set installed version") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(row.installed.label, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Detected now: ${row.installed.versionName.ifBlank { "unknown" }}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = versionText,
+                        onValueChange = { versionText = it },
+                        label = { Text("Installed version") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (catalogVersion != null) {
+                        OutlinedButton(
+                            onClick = { versionText = catalogVersion },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Use catalog version: $catalogVersion")
+                        }
+                    }
+                    Text(
+                        "This override is used like installed-version evidence and is ignored after the app's installed evidence changes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val cleaned = versionText.trim()
+                        if (cleaned.isNotBlank()) {
+                            scope.launch { setManualInstalledVersion(row, cleaned) }
+                            manualVersionTarget = null
+                        }
+                    }
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        enabled = row.mapping?.manualInstalledVersion?.isNotBlank() == true,
+                        onClick = {
+                            scope.launch {
+                                val existing = repo.get()[row.installed.packageName]
+                                if (existing != null) {
+                                    repo.upsert(
+                                        existing.copy(
+                                            manualInstalledVersion = "",
+                                            manualInstalledVersionFingerprint = "",
+                                        )
+                                    )
+                                }
+                                snackbarMsg = "Cleared installed-version override for ${row.installed.label}"
+                            }
+                            manualVersionTarget = null
+                        }
+                    ) { Text("Clear") }
+                    TextButton(onClick = { manualVersionTarget = null }) { Text("Cancel") }
+                }
+            },
+        )
+    }
+
+    manualDateTarget?.let { target ->
+        val row = target.first
+        val catalogGame = target.second
+        val catalogDate = catalogInstalledDateCandidate(catalogGame)
+        val activeManual = hasActiveManualInstalledDate(row.installed, row.mapping)
+        val shownDate = effectiveInstalledDate(row.installed, row.mapping)
+        AlertDialog(
+            onDismissRequest = { manualDateTarget = null },
+            title = { Text("Set installed date") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(row.installed.label, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Current installed date: ${fmtDateTime(shownDate)}",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    catalogDate?.let { (dateMs, source) ->
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch { setManualInstalledDate(row, dateMs, source) }
+                                manualDateTarget = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Use catalog date: ${fmtDate(dateMs)}")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val initial = shownDate.takeIf { it > 0L } ?: System.currentTimeMillis()
+                            val cal = Calendar.getInstance().apply { timeInMillis = initial }
+                            android.app.DatePickerDialog(
+                                context,
+                                { _, year, month, day ->
+                                    val picked = Calendar.getInstance().apply {
+                                        clear()
+                                        set(year, month, day, 12, 0, 0)
+                                    }.timeInMillis
+                                    scope.launch { setManualInstalledDate(row, picked, "manual date") }
+                                    manualDateTarget = null
+                                },
+                                cal.get(Calendar.YEAR),
+                                cal.get(Calendar.MONTH),
+                                cal.get(Calendar.DAY_OF_MONTH),
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Pick date manually")
+                    }
+                    Text(
+                        "This override is used for installed-date comparisons and is ignored after the app's installed evidence changes.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                Row {
+                    TextButton(
+                        enabled = activeManual,
+                        onClick = {
+                            scope.launch {
+                                val existing = repo.get()[row.installed.packageName]
+                                if (existing != null) {
+                                    repo.upsert(
+                                        existing.copy(
+                                            manualInstalledDate = 0L,
+                                            manualInstalledDateFingerprint = "",
+                                            manualInstalledDateSource = "",
+                                        )
+                                    )
+                                }
+                                snackbarMsg = "Cleared installed-date override for ${row.installed.label}"
+                            }
+                            manualDateTarget = null
+                        }
+                    ) { Text("Clear") }
+                    TextButton(onClick = { manualDateTarget = null }) { Text("Cancel") }
+                }
+            },
         )
     }
 
@@ -5107,9 +5586,6 @@ fun InstalledScreen(
                         prepareJoiPlayArchiveInstall(file)
                     }
                     InstallRouting.JoiPlayPickRoute.LaunchFile -> {
-                        // Launch file — send directly to JoiPlay using the raw file:// URI.
-                        // VmPolicy bypass in onCreate allows this; JoiPlay reads via its own
-                        // MANAGE_EXTERNAL_STORAGE.
                         scope.launch {
                             val uri = Uri.fromFile(file)
                             val intent = JoiPlayInstaller.buildIntent(context, uri)
@@ -5459,10 +5935,6 @@ fun InstalledScreen(
                     }
                 } else {
                     scope.launch {
-                        // For file:// URIs we keep the raw scheme — JoiPlay needs the real
-                        // filesystem path so it can index sibling files in the game folder.
-                        // We've bypassed FileUriExposedException via VmPolicy in onCreate;
-                        // JoiPlay has MANAGE_EXTERNAL_STORAGE so reading works fine.
                         val intent = JoiPlayInstaller.buildIntent(context, uri)
                         if (intent == null) {
                             snackbarMsg = "JoiPlay can't handle that file."
@@ -5714,96 +6186,135 @@ private fun SourceFilterRow(sourceFilter: AppSource?, onChange: (AppSource?) -> 
 @Composable
 private fun CompactInstalledFilterRow(
     active: SnapshotStateList<UpdateStatus>,
-    manualOnly: Boolean,
-    onManualOnlyChange: (Boolean) -> Unit,
-    hasSavesOnly: Boolean,
-    onHasSavesOnlyChange: (Boolean) -> Unit,
     sourceFilter: AppSource?,
     onSourceChange: (AppSource?) -> Unit,
+    manualOnly: Boolean,
+    onManualOnlyChange: (Boolean) -> Unit,
+    threadUpdatedAfterInstall: Boolean,
+    onThreadUpdatedAfterInstallChange: (Boolean) -> Unit,
+    hasSavesOnly: Boolean,
+    onHasSavesOnlyChange: (Boolean) -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        UpdateStatus.values().filterNot { it == UpdateStatus.CheckFailed }.forEach { s ->
-            val selected = s in active
-            FilterChip(
-                selected = selected,
-                onClick = { if (selected) active.remove(s) else active.add(s) },
-                label = { Text(statusLabel(s), fontSize = 12.sp) },
-                leadingIcon = {
-                    Box(modifier = Modifier.size(10.dp)) {
-                        Surface(color = statusColor(s), shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxSize()) {}
-                    }
-                },
-            )
-        }
-        FilterChip(
-            selected = manualOnly,
-            onClick = { onManualOnlyChange(!manualOnly) },
-            label = { Text("Manually matched", fontSize = 12.sp) },
-            leadingIcon = {
-                Box(modifier = Modifier.size(10.dp)) {
-                    Surface(color = Color(0xFFBA68C8), shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxSize()) {}
-                }
-            },
-        )
-        FilterChip(
-            selected = hasSavesOnly,
-            onClick = { onHasSavesOnlyChange(!hasSavesOnly) },
-            label = { Text("Has saves", fontSize = 12.sp) },
-            leadingIcon = { Icon(Icons.Default.Save, null, modifier = Modifier.size(14.dp)) },
-        )
-        FilterChip(
-            selected = sourceFilter == AppSource.Android,
-            onClick = { onSourceChange(if (sourceFilter == AppSource.Android) null else AppSource.Android) },
-            label = { Text("Android", fontSize = 12.sp) },
-            leadingIcon = { Icon(Icons.Default.Android, null, modifier = Modifier.size(14.dp)) },
-        )
-        FilterChip(
-            selected = sourceFilter == AppSource.JoiPlay,
-            onClick = { onSourceChange(if (sourceFilter == AppSource.JoiPlay) null else AppSource.JoiPlay) },
-            label = { Text("JoiPlay", fontSize = 12.sp) },
-            leadingIcon = { Icon(Icons.Default.SportsEsports, null, modifier = Modifier.size(14.dp)) },
-        )
-    }
+    InstalledFilterDropdownRow(
+        active = active,
+        sourceFilter = sourceFilter,
+        onSourceChange = onSourceChange,
+        manualOnly = manualOnly,
+        onManualOnlyChange = onManualOnlyChange,
+        threadUpdatedAfterInstall = threadUpdatedAfterInstall,
+        onThreadUpdatedAfterInstallChange = onThreadUpdatedAfterInstallChange,
+        hasSavesOnly = hasSavesOnly,
+        onHasSavesOnlyChange = onHasSavesOnlyChange,
+        verticalPadding = 2.dp,
+    )
 }
 
 @Composable
 private fun FilterBar(
     active: SnapshotStateList<UpdateStatus>,
+    sourceFilter: AppSource?,
+    onSourceChange: (AppSource?) -> Unit,
     manualOnly: Boolean,
     onManualOnlyChange: (Boolean) -> Unit,
+    threadUpdatedAfterInstall: Boolean,
+    onThreadUpdatedAfterInstallChange: (Boolean) -> Unit,
     hasSavesOnly: Boolean,
     onHasSavesOnlyChange: (Boolean) -> Unit,
 ) {
+    InstalledFilterDropdownRow(
+        active = active,
+        sourceFilter = sourceFilter,
+        onSourceChange = onSourceChange,
+        manualOnly = manualOnly,
+        onManualOnlyChange = onManualOnlyChange,
+        threadUpdatedAfterInstall = threadUpdatedAfterInstall,
+        onThreadUpdatedAfterInstallChange = onThreadUpdatedAfterInstallChange,
+        hasSavesOnly = hasSavesOnly,
+        onHasSavesOnlyChange = onHasSavesOnlyChange,
+        verticalPadding = 6.dp,
+    )
+}
+
+@Composable
+private fun InstalledFilterDropdownRow(
+    active: SnapshotStateList<UpdateStatus>,
+    sourceFilter: AppSource?,
+    onSourceChange: (AppSource?) -> Unit,
+    manualOnly: Boolean,
+    onManualOnlyChange: (Boolean) -> Unit,
+    threadUpdatedAfterInstall: Boolean,
+    onThreadUpdatedAfterInstallChange: (Boolean) -> Unit,
+    hasSavesOnly: Boolean,
+    onHasSavesOnlyChange: (Boolean) -> Unit,
+    verticalPadding: androidx.compose.ui.unit.Dp,
+) {
+    val statusOptions = remember {
+        UpdateStatus.values()
+            .filterNot { it == UpdateStatus.CheckFailed || it == UpdateStatus.Unknown }
+            .sortedBy { statusLabel(it) }
+    }
+    var statusMenuOpen by remember { mutableStateOf(false) }
+    var sourceMenuOpen by remember { mutableStateOf(false) }
+    val selectedStatus = active.firstOrNull()
+    val statusText = selectedStatus?.let { statusLabel(it) } ?: "All"
+    val sourceText = when (sourceFilter) {
+        null -> "All"
+        AppSource.Android -> "Android"
+        AppSource.JoiPlay -> "JoiPlay"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = verticalPadding),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        UpdateStatus.values().filterNot { it == UpdateStatus.CheckFailed }.forEach { s ->
-            val selected = s in active
-            FilterChip(
-                selected = selected,
-                onClick = {
-                    if (selected) active.remove(s) else active.add(s)
-                },
-                label = { Text(statusLabel(s), fontSize = 12.sp) },
-                leadingIcon = {
-                    Box(modifier = Modifier.size(10.dp)) {
-                        Surface(color = statusColor(s), shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxSize()) {}
-                    }
+        Box {
+            OutlinedButton(onClick = { statusMenuOpen = true }) {
+                Text("Status: $statusText", fontSize = 12.sp)
+            }
+            DropdownMenu(expanded = statusMenuOpen, onDismissRequest = { statusMenuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("All") },
+                    onClick = {
+                        active.clear()
+                        statusMenuOpen = false
+                    },
+                )
+                statusOptions.forEach { s ->
+                    DropdownMenuItem(
+                        text = { Text(statusLabel(s)) },
+                        onClick = {
+                            active.clear()
+                            active.add(s)
+                            statusMenuOpen = false
+                        },
+                    )
                 }
-            )
+            }
+        }
+        Box {
+            OutlinedButton(onClick = { sourceMenuOpen = true }) {
+                Text("Source: $sourceText", fontSize = 12.sp)
+            }
+            DropdownMenu(expanded = sourceMenuOpen, onDismissRequest = { sourceMenuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("All") },
+                    onClick = {
+                        onSourceChange(null)
+                        sourceMenuOpen = false
+                    },
+                )
+                listOf(AppSource.Android, AppSource.JoiPlay).forEach { source ->
+                    DropdownMenuItem(
+                        text = { Text(if (source == AppSource.Android) "Android" else "JoiPlay") },
+                        onClick = {
+                            onSourceChange(source)
+                            sourceMenuOpen = false
+                        },
+                    )
+                }
+            }
         }
         FilterChip(
             selected = manualOnly,
@@ -5815,6 +6326,12 @@ private fun FilterBar(
                         modifier = Modifier.fillMaxSize()) {}
                 }
             }
+        )
+        FilterChip(
+            selected = threadUpdatedAfterInstall,
+            onClick = { onThreadUpdatedAfterInstallChange(!threadUpdatedAfterInstall) },
+            label = { Text("Thread updated after install", fontSize = 12.sp) },
+            leadingIcon = { Icon(Icons.Default.Update, null, modifier = Modifier.size(14.dp)) },
         )
         FilterChip(
             selected = hasSavesOnly,
@@ -5842,10 +6359,14 @@ private fun statusColor(s: UpdateStatus): Color = when (s) {
 }
 
 private fun versionEvidenceSummary(app: InstalledApp, mapping: AppMapping?): String {
-    val installed = app.versionName.ifBlank { "unknown" }
+    val installed = effectiveInstalledVersion(app, mapping).ifBlank { "unknown" }
     val installedSource = when (app.source) {
         AppSource.Android -> "Android PackageManager versionName"
         AppSource.JoiPlay -> "JoiPlay row/folder metadata; use Detect version for file/marker candidates"
+    }
+    if (hasActiveManualInstalledVersion(app, mapping)) {
+        val latest = mapping?.lastSeenVersion?.let { "latest catalog $it" } ?: "no catalog version"
+        return "$installed from manual installed-version override; $latest"
     }
     val latest = mapping?.lastSeenVersion?.let { "latest catalog $it" } ?: "no catalog version"
     return "$installed from $installedSource; $latest"
@@ -5857,11 +6378,11 @@ private fun updateDecisionSummary(app: InstalledApp, mapping: AppMapping?, statu
         mapping.lastSeenVersion == null -> "Unknown: mapped, but latest catalog version is unknown."
         mapping.acknowledgedVersion != null && mapping.acknowledgedVersion == mapping.lastSeenVersion ->
             "Current: user acknowledged ${mapping.lastSeenVersion} as installed."
-        VersionCompare.matchesInstalled(mapping.lastSeenVersion, app.versionName) ->
-            "Current: installed '${app.versionName}' structurally matches catalog '${mapping.lastSeenVersion}'."
+        VersionCompare.matchesInstalled(mapping.lastSeenVersion, effectiveInstalledVersion(app, mapping)) ->
+            "Current: installed '${effectiveInstalledVersion(app, mapping)}' structurally matches catalog '${mapping.lastSeenVersion}'."
         status == UpdateStatus.UpdateAvailable ->
-            "Update: installed '${app.versionName.ifBlank { "unknown" }}' differs from catalog '${mapping.lastSeenVersion}'."
-        else -> "${statusLabel(status)}: installed '${app.versionName.ifBlank { "unknown" }}', catalog '${mapping.lastSeenVersion}'."
+            "Update: installed '${effectiveInstalledVersion(app, mapping).ifBlank { "unknown" }}' differs from catalog '${mapping.lastSeenVersion}'."
+        else -> "${statusLabel(status)}: installed '${effectiveInstalledVersion(app, mapping).ifBlank { "unknown" }}', catalog '${mapping.lastSeenVersion}'."
     }
 
 private val dateFmt: DateFormat = DateFormat.getDateInstance(DateFormat.MEDIUM)
@@ -5899,6 +6420,8 @@ private fun GameActionDropdown(
     onOpen: () -> Unit,
     onRefreshOne: () -> Unit,
     onEdit: () -> Unit,
+    onSetInstalledVersion: () -> Unit,
+    onSetInstalledDate: () -> Unit,
     onOpenRenPySaves: () -> Unit,
     onAddRenPySaveFolder: () -> Unit,
     onOpenRpgmSaves: () -> Unit,
@@ -5906,7 +6429,18 @@ private fun GameActionDropdown(
     onToggleExpand: () -> Unit,
     onUninstall: () -> Unit,
 ) {
-    DropdownMenu(expanded = actionMenuOpen, onDismissRequest = onDismiss) {
+    var groupOpen by remember { mutableStateOf<GameActionGroup?>(null) }
+    fun closeAll() {
+        groupOpen = null
+        onDismiss()
+    }
+    DropdownMenu(
+        expanded = actionMenuOpen,
+        onDismissRequest = {
+            groupOpen = null
+            onDismiss()
+        },
+    ) {
         Text(
             "Game actions",
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -5916,71 +6450,153 @@ private fun GameActionDropdown(
         DropdownMenuItem(
             text = { Text("Launch game/app") },
             leadingIcon = { Icon(Icons.Default.PlayArrow, null) },
-            onClick = { onDismiss(); onLaunch() },
+            onClick = { closeAll(); onLaunch() },
         )
         DropdownMenuItem(
-            text = { Text(if (row.mapping?.f95Url != null) "Open source page" else "Search source page") },
+            text = { Text(if (row.mapping?.f95Url != null) "Open thread/source" else "Search thread/source") },
             leadingIcon = {
                 Icon(if (row.mapping?.f95Url != null) Icons.Default.OpenInBrowser else Icons.Default.Search, null)
             },
-            onClick = { onDismiss(); onOpen() },
+            onClick = { closeAll(); onOpen() },
         )
         DropdownMenuItem(
-            text = { Text("Refresh this game") },
+            text = { Text("Refresh / check update") },
             leadingIcon = { Icon(Icons.Default.Refresh, null) },
-            onClick = { onDismiss(); onRefreshOne() },
+            onClick = { closeAll(); onRefreshOne() },
         )
         DropdownMenuItem(
-            text = { Text("Edit catalog match") },
+            text = { Text("Match, notes & status") },
             leadingIcon = { Icon(Icons.Default.Edit, null) },
-            onClick = { onDismiss(); onEdit() },
+            onClick = { closeAll(); onEdit() },
+        )
+        DropdownMenuItem(
+            text = { Text("Set installed info") },
+            leadingIcon = { Icon(Icons.Default.Event, null) },
+            trailingIcon = { Icon(Icons.Default.ChevronLeft, null) },
+            onClick = { groupOpen = GameActionGroup.InstalledInfo },
+        )
+        DropdownMenuItem(
+            text = { Text("Storage & saves") },
+            leadingIcon = { Icon(Icons.Default.FolderOpen, null) },
+            trailingIcon = { Icon(Icons.Default.ChevronLeft, null) },
+            onClick = { groupOpen = GameActionGroup.StorageSaves },
         )
         DropdownMenuItem(
             text = { Text(if (expanded) "Hide details" else "Show details") },
             leadingIcon = { Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null) },
-            onClick = { onDismiss(); onToggleExpand() },
+            onClick = { closeAll(); onToggleExpand() },
         )
-        HorizontalDivider()
-        Text(
-            "Save tools",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        DropdownMenuItem(
-            text = { Text("Open Ren'Py save editor") },
-            leadingIcon = { Icon(Icons.Default.Save, null) },
-            enabled = renPySaves.isNotEmpty(),
-            onClick = { onDismiss(); onOpenRenPySaves() },
-        )
-        DropdownMenuItem(
-            text = { Text("Add Ren'Py save folder") },
-            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
-            onClick = { onDismiss(); onAddRenPySaveFolder() },
-        )
-        DropdownMenuItem(
-            text = { Text("Open RPGM save editor") },
-            leadingIcon = { Icon(Icons.Default.Save, null) },
-            enabled = rpgmSaves.isNotEmpty(),
-            onClick = { onDismiss(); onOpenRpgmSaves() },
-        )
-        DropdownMenuItem(
-            text = { Text("Add RPGM save folder") },
-            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
-            onClick = { onDismiss(); onAddRpgmSaveFolder() },
-        )
-        HorizontalDivider()
-        Text(
-            "Storage",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        DropdownMenuItem(
-            text = { Text(if (row.installed.source == AppSource.JoiPlay) "Delete JoiPlay game" else "Uninstall Android app") },
-            leadingIcon = { Icon(Icons.Default.Delete, null) },
-            onClick = { onDismiss(); onUninstall() },
-        )
+    }
+    DropdownMenu(
+        expanded = groupOpen != null,
+        onDismissRequest = { groupOpen = null },
+        offset = DpOffset(x = (-292).dp, y = 0.dp),
+    ) {
+        groupOpen?.let { group ->
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                tonalElevation = 6.dp,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)),
+            ) {
+                Column {
+                    GameActionSubmenu(
+                        group = group,
+                        row = row,
+                        renPySaves = renPySaves,
+                        rpgmSaves = rpgmSaves,
+                        onDismiss = ::closeAll,
+                        onRefreshOne = onRefreshOne,
+                        onEdit = onEdit,
+                        onSetInstalledVersion = onSetInstalledVersion,
+                        onSetInstalledDate = onSetInstalledDate,
+                        onOpenRenPySaves = onOpenRenPySaves,
+                        onAddRenPySaveFolder = onAddRenPySaveFolder,
+                        onOpenRpgmSaves = onOpenRpgmSaves,
+                        onAddRpgmSaveFolder = onAddRpgmSaveFolder,
+                        onUninstall = onUninstall,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private enum class GameActionGroup(val title: String) {
+    InstalledInfo("Set installed info"),
+    StorageSaves("Storage & saves"),
+}
+
+@Composable
+private fun GameActionSubmenu(
+    group: GameActionGroup,
+    row: AppRow,
+    renPySaves: List<RenPySaveAssociation>,
+    rpgmSaves: List<RpgmSaveLocation>,
+    onDismiss: () -> Unit,
+    onRefreshOne: () -> Unit,
+    onEdit: () -> Unit,
+    onSetInstalledVersion: () -> Unit,
+    onSetInstalledDate: () -> Unit,
+    onOpenRenPySaves: () -> Unit,
+    onAddRenPySaveFolder: () -> Unit,
+    onOpenRpgmSaves: () -> Unit,
+    onAddRpgmSaveFolder: () -> Unit,
+    onUninstall: () -> Unit,
+) {
+    fun runAction(action: () -> Unit) {
+        onDismiss()
+        action()
+    }
+    Text(
+        group.title,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.SemiBold,
+    )
+    when (group) {
+        GameActionGroup.InstalledInfo -> {
+            DropdownMenuItem(
+                text = { Text("Set installed version") },
+                leadingIcon = { Icon(Icons.Default.Edit, null) },
+                onClick = { runAction(onSetInstalledVersion) },
+            )
+            DropdownMenuItem(
+                text = { Text("Set installed date") },
+                leadingIcon = { Icon(Icons.Default.Event, null) },
+                onClick = { runAction(onSetInstalledDate) },
+            )
+        }
+        GameActionGroup.StorageSaves -> {
+            DropdownMenuItem(
+                text = { Text("Open Ren'Py save editor") },
+                leadingIcon = { Icon(Icons.Default.Save, null) },
+                enabled = renPySaves.isNotEmpty(),
+                onClick = { runAction(onOpenRenPySaves) },
+            )
+            DropdownMenuItem(
+                text = { Text("Add Ren'Py save folder") },
+                leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+                onClick = { runAction(onAddRenPySaveFolder) },
+            )
+            DropdownMenuItem(
+                text = { Text("Open RPGM save editor") },
+                leadingIcon = { Icon(Icons.Default.Save, null) },
+                enabled = rpgmSaves.isNotEmpty(),
+                onClick = { runAction(onOpenRpgmSaves) },
+            )
+            DropdownMenuItem(
+                text = { Text("Add RPGM save folder") },
+                leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+                onClick = { runAction(onAddRpgmSaveFolder) },
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text(if (row.installed.source == AppSource.JoiPlay) "Delete JoiPlay game" else "Uninstall Android app") },
+                leadingIcon = { Icon(Icons.Default.Delete, null) },
+                onClick = { runAction(onUninstall) },
+            )
+        }
     }
 }
 
@@ -6002,6 +6618,8 @@ private fun NiceGameCard(
     onLongPress: () -> Unit,
     onToggleExpand: () -> Unit,
     onEdit: () -> Unit,
+    onSetInstalledVersion: () -> Unit,
+    onSetInstalledDate: () -> Unit,
     onOpenRenPySaves: () -> Unit,
     onAddRenPySaveFolder: () -> Unit,
     onOpenRpgmSaves: () -> Unit,
@@ -6080,7 +6698,7 @@ private fun NiceGameCard(
                 }
                 Text(
                     listOfNotNull(
-                        row.installed.versionName.ifBlank { "?" },
+                        effectiveInstalledVersion(row.installed, row.mapping).ifBlank { "?" },
                         row.mapping?.lastSeenVersion?.let { "→ $it" },
                     ).joinToString(" "),
                     style = MaterialTheme.typography.bodySmall,
@@ -6125,6 +6743,8 @@ private fun NiceGameCard(
             onOpen = onOpen,
             onRefreshOne = onRefreshOne,
             onEdit = onEdit,
+            onSetInstalledVersion = onSetInstalledVersion,
+            onSetInstalledDate = onSetInstalledDate,
             onOpenRenPySaves = onOpenRenPySaves,
             onAddRenPySaveFolder = onAddRenPySaveFolder,
             onOpenRpgmSaves = onOpenRpgmSaves,
@@ -6153,6 +6773,8 @@ private fun AppRowCard(
     onLongPress: () -> Unit,
     onToggleExpand: () -> Unit,
     onEdit: () -> Unit,
+    onSetInstalledVersion: () -> Unit,
+    onSetInstalledDate: () -> Unit,
     onOpenRenPySaves: () -> Unit,
     onAddRenPySaveFolder: () -> Unit,
     onOpenRpgmSaves: () -> Unit,
@@ -6256,7 +6878,7 @@ private fun AppRowCard(
                         )
                     }
                 }
-                val installedVer = row.installed.versionName.ifBlank { "?" }
+                val installedVer = effectiveInstalledVersion(row.installed, row.mapping).ifBlank { "?" }
                 val latest = row.mapping?.lastSeenVersion
                 Text(
                     text = if (latest != null) "$installedVer → $latest" else installedVer,
@@ -6312,7 +6934,7 @@ private fun AppRowCard(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Inst ${fmtDate(row.installed.firstInstallTime)}",
+                        text = "Inst ${fmtDate(effectiveInstalledDate(row.installed, row.mapping))}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 10.sp
@@ -6374,6 +6996,8 @@ private fun AppRowCard(
                         onOpen = onOpen,
                         onRefreshOne = onRefreshOne,
                         onEdit = onEdit,
+                        onSetInstalledVersion = onSetInstalledVersion,
+                        onSetInstalledDate = onSetInstalledDate,
                         onOpenRenPySaves = onOpenRenPySaves,
                         onAddRenPySaveFolder = onAddRenPySaveFolder,
                         onOpenRpgmSaves = onOpenRpgmSaves,
@@ -6406,7 +7030,17 @@ private fun AppRowCard(
                     )
                 }
                 DetailRow("Version code", row.installed.versionCode.toString())
+                DetailRow("Installed date", fmtDateTime(effectiveInstalledDate(row.installed, row.mapping)))
+                val installedDateSource = if (hasActiveManualInstalledDate(row.installed, row.mapping)) {
+                    row.mapping?.manualInstalledDateSource?.ifBlank { "manual override" }
+                } else {
+                    row.installed.installedDateSource.takeIf { it.isNotBlank() }
+                }
+                installedDateSource?.let { DetailRow("Installed-date source", it) }
                 DetailRow("Last update", fmtDate(row.installed.lastUpdateTime))
+                mappedCatalogGame(row.mapping, catalogGame?.let { mapOf(it.thread_id to it) })?.ts?.takeIf { it > 0L }?.let { ts ->
+                    DetailRow("Thread updated", fmtDateTime(ts * 1000L))
+                }
                 if (row.installed.source == AppSource.JoiPlay) {
                     DetailRow("Total size", if (isJoiPlaySizeScanning) "Scanning…" else fmtSize(displayTotalSize))
                     DetailRow("Size last scanned", fmtDateTime(joiPlaySizeInfo?.lastScannedAt ?: 0L))
@@ -6424,7 +7058,13 @@ private fun AppRowCard(
                     DetailRow("Cache size", fmtSize(row.installed.cacheSize))
                     DetailRow("Total size", fmtSize(row.installed.totalSize))
                 }
-                DetailRow("Installed version", row.installed.versionName.ifBlank { "—" })
+                DetailRow("Installed version", effectiveInstalledVersion(row.installed, row.mapping).ifBlank { "—" })
+                if (hasActiveManualInstalledVersion(row.installed, row.mapping)) {
+                    DetailRow("Installed-version override", row.mapping?.manualInstalledVersion.orEmpty())
+                }
+                if (hasActiveManualInstalledDate(row.installed, row.mapping)) {
+                    DetailRow("Installed-date override", fmtDateTime(row.mapping?.manualInstalledDate ?: 0L))
+                }
                 row.mapping?.let { mapping ->
                     if (mapping.userStatus != UserGameStatus.None) {
                         DetailRow("User status", mapping.userStatus.label)
@@ -10124,7 +10764,10 @@ private fun AmbiguousCatalogDialog(
 @Composable
 private fun UnmappedReviewDialog(
     items: List<AmbiguousCatalogMatch>,
+    alreadyMatchedItems: List<AlreadyMatchedCatalogMatch>,
     onDismiss: () -> Unit,
+    onDismissAlreadyMatched: () -> Unit,
+    onKeepAlreadyMatched: () -> Unit,
     onPick: (AmbiguousCatalogMatch, CatalogGame) -> Unit,
     onNone: (AmbiguousCatalogMatch) -> Unit,
     onSearch: (AmbiguousCatalogMatch) -> Unit,
@@ -10135,7 +10778,7 @@ private fun UnmappedReviewDialog(
         onDismissRequest = onDismiss,
         title = { Text("Review unmapped games") },
         text = {
-            if (items.isEmpty()) {
+            if (items.isEmpty() && alreadyMatchedItems.isEmpty()) {
                 Text(
                     "No unmapped games are currently listed. Use Add manually mapped matches to review manual mappings here.",
                     style = MaterialTheme.typography.bodySmall,
@@ -10147,6 +10790,51 @@ private fun UnmappedReviewDialog(
                         .heightIn(max = 560.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    if (alreadyMatchedItems.isNotEmpty()) {
+                        item("already-matched-header") {
+                            Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.small) {
+                                Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("Already matched (${alreadyMatchedItems.size})", fontWeight = FontWeight.Bold)
+                                    Text(
+                                        "These look like games you already mapped before. Keep all to apply the previous catalog choices and remove them from this review.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Button(onClick = onKeepAlreadyMatched) { Text("Keep all already matched") }
+                                        TextButton(onClick = onDismissAlreadyMatched) { Text("Dismiss all") }
+                                    }
+                                }
+                            }
+                        }
+                        items(alreadyMatchedItems, key = { "already-${it.item.row.installed.packageName}" }) { already ->
+                            val item = already.item
+                            val game = already.keptGame
+                            Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.small) {
+                                Column(Modifier.fillMaxWidth().padding(10.dp)) {
+                                    Text(item.row.installed.label, fontWeight = FontWeight.Bold)
+                                    Text(item.row.installed.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        "Previously mapped to: ${game.title.ifBlank { "(untitled)" }} • ${game.source.displayName} id ${game.sourceId ?: game.thread_id.toString()}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        TextButton(onClick = { onPick(item, game) }) { Text("Keep") }
+                                        TextButton(onClick = { onSearch(item) }) { Text("Search") }
+                                    }
+                                }
+                            }
+                        }
+                        if (items.isNotEmpty()) {
+                            item("unmatched-header") {
+                                Text(
+                                    "New / still unmatched (${items.size})",
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
+                            }
+                        }
+                    }
                     items(items, key = { it.row.installed.packageName }) { item ->
                         Surface(tonalElevation = 1.dp, shape = MaterialTheme.shapes.small) {
                             Column(Modifier.fillMaxWidth().padding(10.dp)) {

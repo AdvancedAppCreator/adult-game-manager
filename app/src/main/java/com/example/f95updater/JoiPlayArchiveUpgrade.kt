@@ -375,6 +375,10 @@ class JoiPlayArchiveUpgradeFlow(
             put("detectedVersion", detectedVersion ?: JSONObject.NULL)
             put("installedAt", isoNow())
             put("previousFolderName", pendingWork.target.name)
+            put("previousFolderPath", pendingWork.target.absolutePath)
+            put("rollbackFolderPath", pendingWork.backup.absolutePath)
+            put("previousInstalledVersion", pendingWork.app.versionName.ifBlank { JSONObject.NULL })
+            put("previousStoragePath", pendingWork.app.storagePath ?: JSONObject.NULL)
             put("previousLaunchFile", pendingWork.execFile)
             put("appLabel", pendingWork.app.label)
         }

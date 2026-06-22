@@ -1002,6 +1002,8 @@ class CatalogRepository(private val context: Context) {
             rating = rating,
             views = popularity?.toLong() ?: 0L,
             ts = parseIsoEpochSeconds(modifiedAt ?: publishedAt),
+            publishedAt = parseIsoEpochSeconds(publishedAt),
+            modifiedAt = parseIsoEpochSeconds(modifiedAt),
             cover = coverUrl,
             source = source,
             sourceId = sourceId,
