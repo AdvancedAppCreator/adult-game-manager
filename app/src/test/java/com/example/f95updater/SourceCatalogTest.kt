@@ -52,4 +52,86 @@ class SourceCatalogTest {
         val json = Json.encodeToString(SourceCatalogIndex.serializer(), original)
         assertEquals(original, Json.decodeFromString(SourceCatalogIndex.serializer(), json))
     }
+
+    @Test
+    fun displayTagsHidesUnknownNumericIds() {
+        val entry = SourceCatalogEntry(
+            source = CatalogSource.F95Zone,
+            sourceId = "1",
+            canonicalUrl = "https://f95zone.to/threads/1/",
+            title = "Example",
+            tags = listOf("7", "999999", "custom text"),
+        )
+        val labels = CatalogLabels(
+            prefixes = mapOf("7" to "Ren'Py"),
+        )
+
+        assertEquals(listOf("Ren'Py", "custom text"), displayTags(entry, labels))
+    }
+
+    @Test
+    fun catalogTagFilterTokenSupportsMultiWordTags() {
+        assertEquals("male-protagonist", catalogTagFilterToken("Male Protagonist"))
+        assertEquals("futa-trans", catalogTagFilterToken("futa/trans"))
+        assertEquals("ren-py", catalogTagFilterToken("Ren'Py"))
+    }
+
+    @Test
+    fun catalogTagMatchesNormalizedAndRawQueries() {
+        assertEquals(true, catalogTagMatchesQuery("Male Protagonist", "male-protagonist"))
+        assertEquals(true, catalogTagMatchesQuery("Male Protagonist", "protag"))
+        assertEquals(true, catalogTagMatchesQuery("futa/trans", "futa-trans"))
+    }
+
+    @Test
+    fun catalogSearchEntryCachesResolvedTagTokens() {
+        val entry = SourceCatalogEntry(
+            source = CatalogSource.F95Zone,
+            sourceId = "1",
+            canonicalUrl = "https://f95zone.to/threads/1/",
+            title = "Example",
+            tags = listOf("7", "130"),
+        )
+        val labels = CatalogLabels(
+            prefixes = mapOf("7" to "Ren'Py"),
+            tags = mapOf("130" to "Male Protagonist"),
+        )
+
+        val indexed = CatalogSearchEntry.from(entry, labels)
+
+        assertEquals(setOf(7, 130), indexed.numericTagIds)
+        assertEquals(true, indexed.tagTokens.contains("male-protagonist"))
+        assertEquals(true, indexed.tagTokens.contains("male protagonist"))
+        assertEquals(true, indexed.tagTokens.contains("ren-py"))
+    }
+
+    @Test
+    fun catalogFilterLabelsOnlyIncludesTagsPresentInEntries() {
+        val labels = CatalogLabels(
+            prefixes = mapOf("7" to "Ren'Py", "2" to "RPGM"),
+            tags = mapOf("130" to "Male Protagonist", "999" to "Unused Label"),
+        )
+        val entries = listOf(
+            CatalogSearchEntry.from(
+                SourceCatalogEntry(
+                    source = CatalogSource.F95Zone,
+                    sourceId = "1",
+                    canonicalUrl = "https://f95zone.to/threads/1/",
+                    title = "Example",
+                    tags = listOf("7", "130"),
+                ),
+                labels,
+            ),
+        )
+
+        assertEquals(listOf("Male Protagonist", "Ren'Py"), catalogFilterLabels(entries))
+    }
+
+    @Test
+    fun addAndRemoveCatalogTagFiltersUseNormalizedTokens() {
+        val query = addCatalogTagFilter("alice", "Male Protagonist")
+
+        assertEquals("alice tag:male-protagonist ", query)
+        assertEquals("alice ", removeCatalogTagFilter(query, "Male Protagonist"))
+    }
 }

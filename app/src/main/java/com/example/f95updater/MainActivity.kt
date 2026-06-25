@@ -6255,6 +6255,7 @@ private fun InstalledFilterDropdownRow(
     }
     var statusMenuOpen by remember { mutableStateOf(false) }
     var sourceMenuOpen by remember { mutableStateOf(false) }
+    var libraryFilterMenuOpen by remember { mutableStateOf(false) }
     val selectedStatus = active.firstOrNull()
     val statusText = selectedStatus?.let { statusLabel(it) } ?: "All"
     val sourceText = when (sourceFilter) {
@@ -6262,6 +6263,10 @@ private fun InstalledFilterDropdownRow(
         AppSource.Android -> "Android"
         AppSource.JoiPlay -> "JoiPlay"
     }
+    val libraryFilterCount =
+        (if (manualOnly) 1 else 0) +
+            (if (threadUpdatedAfterInstall) 1 else 0) +
+            (if (hasSavesOnly) 1 else 0)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -6316,29 +6321,49 @@ private fun InstalledFilterDropdownRow(
                 }
             }
         }
-        FilterChip(
-            selected = manualOnly,
-            onClick = { onManualOnlyChange(!manualOnly) },
-            label = { Text("Manually matched", fontSize = 12.sp) },
-            leadingIcon = {
-                Box(modifier = Modifier.size(10.dp)) {
-                    Surface(color = Color(0xFFBA68C8), shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxSize()) {}
+        Box {
+            OutlinedButton(onClick = { libraryFilterMenuOpen = true }) {
+                Icon(Icons.Default.FilterList, null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    if (libraryFilterCount > 0) "Filters ($libraryFilterCount)" else "Filters",
+                    fontSize = 12.sp,
+                )
+            }
+            DropdownMenu(
+                expanded = libraryFilterMenuOpen,
+                onDismissRequest = { libraryFilterMenuOpen = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Manually matched") },
+                    leadingIcon = { Checkbox(checked = manualOnly, onCheckedChange = null) },
+                    onClick = { onManualOnlyChange(!manualOnly) },
+                )
+                DropdownMenuItem(
+                    text = { Text("Thread updated after install") },
+                    leadingIcon = { Checkbox(checked = threadUpdatedAfterInstall, onCheckedChange = null) },
+                    onClick = { onThreadUpdatedAfterInstallChange(!threadUpdatedAfterInstall) },
+                )
+                DropdownMenuItem(
+                    text = { Text("Has saves") },
+                    leadingIcon = { Checkbox(checked = hasSavesOnly, onCheckedChange = null) },
+                    onClick = { onHasSavesOnlyChange(!hasSavesOnly) },
+                )
+                if (libraryFilterCount > 0) {
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Clear filters") },
+                        leadingIcon = { Icon(Icons.Default.Close, null) },
+                        onClick = {
+                            onManualOnlyChange(false)
+                            onThreadUpdatedAfterInstallChange(false)
+                            onHasSavesOnlyChange(false)
+                            libraryFilterMenuOpen = false
+                        },
+                    )
                 }
             }
-        )
-        FilterChip(
-            selected = threadUpdatedAfterInstall,
-            onClick = { onThreadUpdatedAfterInstallChange(!threadUpdatedAfterInstall) },
-            label = { Text("Thread updated after install", fontSize = 12.sp) },
-            leadingIcon = { Icon(Icons.Default.Update, null, modifier = Modifier.size(14.dp)) },
-        )
-        FilterChip(
-            selected = hasSavesOnly,
-            onClick = { onHasSavesOnlyChange(!hasSavesOnly) },
-            label = { Text("Has saves", fontSize = 12.sp) },
-            leadingIcon = { Icon(Icons.Default.Save, null, modifier = Modifier.size(14.dp)) },
-        )
+        }
     }
 }
 

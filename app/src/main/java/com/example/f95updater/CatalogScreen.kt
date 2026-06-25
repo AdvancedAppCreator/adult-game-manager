@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 enum class CatalogSortKey(val label: String) {
@@ -101,6 +102,7 @@ fun CatalogScreen(
     }
 
     var query by remember { mutableStateOf("") }
+    var debouncedQuery by remember { mutableStateOf("") }
     var sortKey by remember { mutableStateOf(CatalogSortKey.Rating) }
     var sortDesc by remember { mutableStateOf(true) }
     var sortMenuOpen by remember { mutableStateOf(false) }
@@ -116,6 +118,11 @@ fun CatalogScreen(
 
     LaunchedEffect(screenshotQuery) {
         if (screenshotQuery != null) query = screenshotQuery
+    }
+
+    LaunchedEffect(query) {
+        delay(200)
+        debouncedQuery = query
     }
 
     // 1. Load persisted filter state on first composition.
@@ -145,57 +152,67 @@ fun CatalogScreen(
         ))
     }
 
-    // Cache the set of thread_ids that are linked to an installed app for quick filtering.
-    val installedThreadIds: Set<Int> = remember(mappings) {
-        mappings.values.mapNotNull {
-            it.threadId ?: F95UrlParser.extractThreadId(it.f95Url)
-        }.toSet()
+    // Cache source-aware catalog identifiers linked to installed apps for quick filtering.
+    val installedCatalogKeys: Set<CatalogInstallKey> = remember(mappings) {
+        mappings.values.flatMap { catalogInstallKeys(it) }.toSet()
+    }
+    val installedCatalogUrls: Set<String> = remember(mappings) {
+        mappings.values.flatMap { catalogInstallUrls(it) }.toSet()
+    }
+    fun isInstalled(entry: SourceCatalogEntry): Boolean {
+        return catalogInstallKey(entry) in installedCatalogKeys ||
+            (entry.canonicalUrl.isNotBlank() && entry.canonicalUrl in installedCatalogUrls)
     }
 
     var detailGame by remember { mutableStateOf<SourceCatalogEntry?>(null) }
+    val searchEntries = remember(allEntries, labels) {
+        allEntries.map { CatalogSearchEntry.from(it, labels) }
+    }
+    val availableCatalogTagLabels = remember(searchEntries) {
+        catalogFilterLabels(searchEntries)
+    }
 
     val filteredAndSorted: List<SourceCatalogEntry> = remember(
-        allEntries, query, sortKey, sortDesc,
+        searchEntries, debouncedQuery, sortKey, sortDesc,
         statusFilter, engineFilter, categoryFilter, sourceFilter, platformFilter, minRating,
-        installedOnly, notInstalledOnly, installedThreadIds, labels,
+        installedOnly, notInstalledOnly, installedCatalogKeys, installedCatalogUrls,
     ) {
-        if (allEntries.isEmpty()) return@remember emptyList()
-        val parsed = parseSearchQuery(query)
+        if (searchEntries.isEmpty()) return@remember emptyList()
+        val parsed = parseSearchQuery(debouncedQuery)
         val freeText = parsed.freeText.lowercase()
-        var seq = allEntries.asSequence()
+        var seq = searchEntries.asSequence()
         if (freeText.isNotEmpty()) {
-            seq = seq.filter { entry ->
-                entry.title.lowercase().contains(freeText) ||
-                    (entry.developer?.lowercase()?.contains(freeText) == true) ||
-                    entry.source.displayName.lowercase().contains(freeText)
+            seq = seq.filter { item ->
+                item.titleLower.contains(freeText) ||
+                    item.developerLower.contains(freeText) ||
+                    item.sourceLower.contains(freeText)
             }
         }
         if (parsed.tags.isNotEmpty()) {
-            seq = seq.filter { entry ->
-                val tagNames = displayTags(entry, labels).map { it.lowercase() }
-                if (tagNames.isEmpty()) false
-                else parsed.tags.all { tq -> tagNames.any { it.contains(tq) } }
+            seq = seq.filter { item ->
+                item.tagTokens.isNotEmpty() &&
+                    parsed.tags.all { tq -> item.tagTokens.any { tag -> tag.contains(tq) } }
             }
         }
-        statusFilter?.let { sf -> seq = seq.filter { sourceTagIds(it).contains(sf) } }
-        engineFilter?.let { ef -> seq = seq.filter { sourceTagIds(it).contains(ef) } }
-        categoryFilter?.let { cf -> seq = seq.filter { it.tags.any { tag -> tag.equals(cf, ignoreCase = true) } } }
-        sourceFilter?.let { sf -> seq = seq.filter { it.source == sf } }
-        platformFilter?.let { pf -> seq = seq.filter { entry -> entry.platforms.any { platformMatches(it, pf) } } }
-        if (minRating > 0f) seq = seq.filter { (it.rating ?: 0.0) >= minRating }
-        if (installedOnly) seq = seq.filter { f95ThreadIdOrNull(it)?.let { id -> id in installedThreadIds } == true }
-        if (notInstalledOnly) seq = seq.filter { f95ThreadIdOrNull(it)?.let { id -> id in installedThreadIds } != true }
+        statusFilter?.let { sf -> seq = seq.filter { sf in it.numericTagIds } }
+        engineFilter?.let { ef -> seq = seq.filter { ef in it.numericTagIds } }
+        categoryFilter?.let { cf -> seq = seq.filter { item -> item.entry.tags.any { tag -> tag.equals(cf, ignoreCase = true) } } }
+        sourceFilter?.let { sf -> seq = seq.filter { it.entry.source == sf } }
+        platformFilter?.let { pf -> seq = seq.filter { item -> item.entry.platforms.any { platformMatches(it, pf) } } }
+        if (minRating > 0f) seq = seq.filter { (it.entry.rating ?: 0.0) >= minRating }
+        if (installedOnly) seq = seq.filter { isInstalled(it.entry) }
+        if (notInstalledOnly) seq = seq.filterNot { isInstalled(it.entry) }
 
         val sorted = when (sortKey) {
-            CatalogSortKey.Title -> seq.sortedBy { it.title.lowercase() }
+            CatalogSortKey.Title -> seq.sortedBy { it.titleLower }
             CatalogSortKey.Rating -> seq.sortedWith(
-                compareBy({ it.rating ?: 0.0 }, { it.popularity ?: 0.0 })
+                compareBy({ it.entry.rating ?: 0.0 }, { it.entry.popularity ?: 0.0 })
             )
-            CatalogSortKey.Updated -> seq.sortedBy { it.modifiedAt ?: it.publishedAt ?: "" }
-            CatalogSortKey.Newest -> seq.sortedBy { it.publishedAt ?: it.modifiedAt ?: "" }
-            CatalogSortKey.Views -> seq.sortedBy { it.popularity ?: 0.0 }
-            CatalogSortKey.Likes -> seq.sortedBy { it.popularity ?: 0.0 }
-        }.toList()
+            CatalogSortKey.Updated -> seq.sortedBy { it.entry.modifiedAt ?: it.entry.publishedAt ?: "" }
+            CatalogSortKey.Newest -> seq.sortedBy { it.entry.publishedAt ?: it.entry.modifiedAt ?: "" }
+            CatalogSortKey.Views -> seq.sortedBy { it.entry.popularity ?: 0.0 }
+            CatalogSortKey.Likes -> seq.sortedBy { it.entry.popularity ?: 0.0 }
+        }.map { it.entry }.toList()
         if (sortDesc) sorted.reversed() else sorted
     }
 
@@ -310,7 +327,7 @@ fun CatalogScreen(
                                 // Replace the matched "tag:<prefix>" suffix with the
                                 // completed "tag:<full> ".
                                 val before = query.substring(0, match.range.first)
-                                query = before + "tag:" + suggestion + " "
+                                query = before + "tag:" + catalogTagFilterToken(suggestion) + " "
                             },
                             label = { Text(suggestion, fontSize = 12.sp) },
                         )
@@ -318,6 +335,16 @@ fun CatalogScreen(
                 }
             }
             CatalogFilters(
+                availableTagLabels = availableCatalogTagLabels,
+                selectedTags = parseTagFilters(query),
+                onAddTagFilter = { tag ->
+                    query = addCatalogTagFilter(query, tag)
+                    focusManager.clearFocus()
+                },
+                onRemoveTagFilter = { tag ->
+                    query = removeCatalogTagFilter(query, tag)
+                    focusManager.clearFocus()
+                },
                 statusFilter = statusFilter, onStatusChange = { statusFilter = it },
                 engineFilter = engineFilter, onEngineChange = { engineFilter = it },
                 categoryFilter = categoryFilter, onCategoryChange = { categoryFilter = it },
@@ -355,7 +382,7 @@ fun CatalogScreen(
                         CatalogRowCard(
                             entry = g,
                             labels = labels,
-                            installed = f95ThreadIdOrNull(g)?.let { it in installedThreadIds } == true,
+                            installed = isInstalled(g),
                             onClick = { detailGame = g },
                             onOpen = { onOpenThread(g.canonicalUrl) },
                         )
@@ -369,7 +396,7 @@ fun CatalogScreen(
         CatalogDetailDialog(
             game = g,
             labels = labels,
-            installed = f95ThreadIdOrNull(g)?.let { it in installedThreadIds } == true,
+            installed = isInstalled(g),
             onDismiss = {
                 detailGame = null
                 // After the dialog goes away the underlying screen's OutlinedTextField
@@ -384,6 +411,10 @@ fun CatalogScreen(
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun CatalogFilters(
+    availableTagLabels: List<String>,
+    selectedTags: List<String>,
+    onAddTagFilter: (String) -> Unit,
+    onRemoveTagFilter: (String) -> Unit,
     statusFilter: Int?, onStatusChange: (Int?) -> Unit,
     engineFilter: Int?, onEngineChange: (Int?) -> Unit,
     categoryFilter: String?, onCategoryChange: (String?) -> Unit,
@@ -394,6 +425,24 @@ private fun CatalogFilters(
     notInstalledOnly: Boolean, onNotInstalledOnlyChange: (Boolean) -> Unit,
 ) {
     var filterSheetOpen by remember { mutableStateOf(false) }
+    var sourceMenuOpen by remember { mutableStateOf(false) }
+    var platformMenuOpen by remember { mutableStateOf(false) }
+    var tagMenuOpen by remember { mutableStateOf(false) }
+    var tagSearch by remember { mutableStateOf("") }
+    val selectedTagLabels = remember(selectedTags, availableTagLabels) {
+        selectedTags.map { tagFilterLabelForToken(it, availableTagLabels) }.distinct()
+    }
+    val visibleTagLabels = remember(availableTagLabels, tagSearch, selectedTags) {
+        val selectedTokens = selectedTags.map { it.lowercase() }.toSet()
+        val needle = tagSearch.trim().lowercase()
+        availableTagLabels.asSequence()
+            .filter { label ->
+                catalogTagFilterToken(label).lowercase() !in selectedTokens &&
+                    (needle.isBlank() || label.lowercase().contains(needle) || catalogTagFilterToken(label).contains(needle))
+            }
+            .take(120)
+            .toList()
+    }
     val activeAdvancedCount =
         (if (statusFilter != null) 1 else 0) +
             (if (engineFilter != null) 1 else 0) +
@@ -408,19 +457,149 @@ private fun CatalogFilters(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            for (source in CatalogSource.values()) {
+                Box {
                 FilterChip(
-                    selected = sourceFilter == source,
-                    onClick = { onSourceChange(if (sourceFilter == source) null else source) },
-                    label = { Text(source.displayName, fontSize = 11.sp) },
+                        selected = sourceFilter != null,
+                        onClick = { sourceMenuOpen = true },
+                        leadingIcon = { Icon(Icons.Default.Source, null, modifier = Modifier.size(16.dp)) },
+                        label = {
+                            Text(
+                                sourceFilter?.displayName ?: "Source",
+                                fontSize = 11.sp,
+                            )
+                        },
+                    )
+                    DropdownMenu(
+                        expanded = sourceMenuOpen,
+                        onDismissRequest = { sourceMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("All sources") },
+                            onClick = {
+                                onSourceChange(null)
+                                sourceMenuOpen = false
+                            },
+                        )
+                        CatalogSource.values().forEach { source ->
+                            DropdownMenuItem(
+                                text = { Text(source.displayName) },
+                                leadingIcon = {
+                                    if (sourceFilter == source) {
+                                        Icon(Icons.Default.Check, null)
+                                    }
+                                },
+                                onClick = {
+                                    onSourceChange(source)
+                                    sourceMenuOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Box {
+                    FilterChip(
+                        selected = platformFilter != null,
+                        onClick = { platformMenuOpen = true },
+                        leadingIcon = { Icon(Icons.Default.Devices, null, modifier = Modifier.size(16.dp)) },
+                        label = {
+                            Text(
+                                platformFilter?.let(::platformDisplayName) ?: "Platform",
+                                fontSize = 11.sp,
+                            )
+                        },
+                    )
+                    DropdownMenu(
+                        expanded = platformMenuOpen,
+                        onDismissRequest = { platformMenuOpen = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("All platforms") },
+                            onClick = {
+                                onPlatformChange(null)
+                                platformMenuOpen = false
+                            },
+                        )
+                        PLATFORM_FILTERS.forEach { platform ->
+                            DropdownMenuItem(
+                                text = { Text(platformDisplayName(platform)) },
+                                leadingIcon = {
+                                    if (platformFilter == platform) {
+                                        Icon(Icons.Default.Check, null)
+                                    }
+                                },
+                                onClick = {
+                                    onPlatformChange(platform)
+                                    platformMenuOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+                Box {
+                    FilterChip(
+                    selected = selectedTags.isNotEmpty(),
+                    onClick = { tagMenuOpen = true },
+                    leadingIcon = { Icon(Icons.Default.LocalOffer, null, modifier = Modifier.size(16.dp)) },
+                    label = {
+                        Text(
+                            if (selectedTags.isNotEmpty()) "Tags (${selectedTags.size})" else "Tags",
+                            fontSize = 11.sp,
+                        )
+                    },
                 )
-            }
-            for (platform in PLATFORM_FILTERS) {
-                FilterChip(
-                    selected = platformFilter == platform,
-                    onClick = { onPlatformChange(if (platformFilter == platform) null else platform) },
-                    label = { Text(platformDisplayName(platform), fontSize = 11.sp) },
-                )
+                DropdownMenu(
+                    expanded = tagMenuOpen,
+                    onDismissRequest = { tagMenuOpen = false },
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .width(320.dp)
+                            .heightIn(max = 420.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = tagSearch,
+                            onValueChange = { tagSearch = it },
+                            placeholder = { Text("Search tags") },
+                            singleLine = true,
+                            leadingIcon = { Icon(Icons.Default.Search, null) },
+                            trailingIcon = {
+                                if (tagSearch.isNotBlank()) {
+                                    IconButton(onClick = { tagSearch = "" }) {
+                                        Icon(Icons.Default.Close, "Clear tag search")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        if (visibleTagLabels.isEmpty()) {
+                            Text(
+                                if (availableTagLabels.isEmpty()) "No catalog tags loaded yet" else "No matching tags",
+                                modifier = Modifier.padding(12.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            Column(
+                                modifier = Modifier
+                                    .heightIn(max = 320.dp)
+                                    .verticalScroll(rememberScrollState()),
+                            ) {
+                                visibleTagLabels.forEach { tag ->
+                                    DropdownMenuItem(
+                                        text = { Text(tag, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                        onClick = {
+                                            onAddTagFilter(tag)
+                                            tagSearch = ""
+                                            tagMenuOpen = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
             FilterChip(
                 selected = activeAdvancedCount > 0,
@@ -434,11 +613,14 @@ private fun CatalogFilters(
                 },
             )
         }
-        if (activeAdvancedCount > 0) {
+        if (activeAdvancedCount > 0 || selectedTagLabels.isNotEmpty()) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                selectedTagLabels.forEach { tag ->
+                    ActiveFilterChip("Tag: $tag", onClear = { onRemoveTagFilter(tag) })
+                }
                 statusFilter?.let { id ->
                     ActiveFilterChip(statusLabel(id), onClear = { onStatusChange(null) })
                 }
@@ -465,24 +647,6 @@ private fun CatalogFilters(
             ) {
                 Text("Catalog filters", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(12.dp))
-                FilterSection("Source") {
-                    CatalogSource.values().forEach { source ->
-                        FilterChip(
-                            selected = sourceFilter == source,
-                            onClick = { onSourceChange(if (sourceFilter == source) null else source) },
-                            label = { Text(source.displayName) },
-                        )
-                    }
-                }
-                FilterSection("Platform") {
-                    PLATFORM_FILTERS.forEach { platform ->
-                        FilterChip(
-                            selected = platformFilter == platform,
-                            onClick = { onPlatformChange(if (platformFilter == platform) null else platform) },
-                            label = { Text(platformDisplayName(platform)) },
-                        )
-                    }
-                }
                 FilterSection("Library") {
                     FilterChip(
                         selected = installedOnly,
@@ -607,11 +771,23 @@ private fun CatalogRowCard(
                     }
                     Text(
                         entry.title,
+                        modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (installed) {
+                        Spacer(Modifier.width(6.dp))
+                        AssistChip(
+                            onClick = {},
+                            label = { Text("Installed", fontSize = 10.sp) },
+                            leadingIcon = {
+                                Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(14.dp))
+                            },
+                            modifier = Modifier.height(24.dp),
+                        )
+                    }
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     entry.developer?.takeIf { it.isNotBlank() }?.let {
@@ -696,6 +872,16 @@ private fun CatalogDetailDialog(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (installed) {
+                    Spacer(Modifier.width(6.dp))
+                    AssistChip(
+                        onClick = {},
+                        label = { Text("Installed") },
+                        leadingIcon = {
+                            Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(16.dp))
+                        },
+                    )
+                }
                 DiagnosticsScreenshotIconButton(namePrefix = "catalog-dialog")
             }
         },
@@ -820,18 +1006,120 @@ private fun platformMatches(platform: String, filter: String): Boolean {
         (filter.equals("Windows", ignoreCase = true) && normalized == "windows/pc")
 }
 
-private fun displayTags(entry: SourceCatalogEntry, labels: CatalogLabels?): List<String> =
+internal fun displayTags(entry: SourceCatalogEntry, labels: CatalogLabels?): List<String> =
     entry.tags.mapNotNull { raw ->
         val id = raw.toIntOrNull()
         when {
-            id != null && labels != null -> labels.prefixes[raw] ?: labels.tags[raw] ?: raw
+            id != null -> labels?.prefixes?.get(raw) ?: labels?.tags?.get(raw)
             raw.isBlank() -> null
             else -> raw
         }
     }.distinct()
 
-private fun f95ThreadIdOrNull(entry: SourceCatalogEntry): Int? =
-    if (entry.source == CatalogSource.F95Zone) entry.sourceId.toIntOrNull() else null
+internal data class CatalogSearchEntry(
+    val entry: SourceCatalogEntry,
+    val titleLower: String,
+    val developerLower: String,
+    val sourceLower: String,
+    val tagLabels: List<String>,
+    val tagTokens: Set<String>,
+    val numericTagIds: Set<Int>,
+) {
+    companion object {
+        fun from(entry: SourceCatalogEntry, labels: CatalogLabels?): CatalogSearchEntry {
+            val tagLabels = displayTags(entry, labels)
+            return CatalogSearchEntry(
+                entry = entry,
+                titleLower = entry.title.lowercase(),
+                developerLower = entry.developer.orEmpty().lowercase(),
+                sourceLower = entry.source.displayName.lowercase(),
+                tagLabels = tagLabels,
+                tagTokens = tagLabels.flatMap { catalogTagSearchTokens(it) }.toSet(),
+                numericTagIds = sourceTagIds(entry),
+            )
+        }
+    }
+}
+
+internal fun catalogTagFilterToken(label: String): String =
+    label.trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
+
+internal fun catalogTagSearchTokens(label: String): Set<String> {
+    val raw = label.trim().lowercase()
+    val normalized = catalogTagFilterToken(label)
+    return setOf(raw, normalized, normalized.replace('-', ' '))
+        .filter { it.isNotBlank() }
+        .toSet()
+}
+
+internal fun catalogTagMatchesQuery(label: String, queryToken: String): Boolean {
+    val query = queryToken.trim().lowercase()
+    return query.isNotBlank() && catalogTagSearchTokens(label).any { it.contains(query) }
+}
+
+internal fun addCatalogTagFilter(query: String, label: String): String {
+    val token = catalogTagFilterToken(label)
+    if (token.isBlank()) return query
+    val existing = parseTagFilters(query).map { it.lowercase() }.toSet()
+    if (token.lowercase() in existing) return query
+    return listOf(query.trim(), "tag:$token")
+        .filter { it.isNotBlank() }
+        .joinToString(" ")
+        .plus(" ")
+}
+
+internal fun removeCatalogTagFilter(query: String, labelOrToken: String): String {
+    val token = catalogTagFilterToken(labelOrToken)
+    if (token.isBlank()) return query
+    return query.split(Regex("\\s+"))
+        .filterNot { part ->
+            part.startsWith("tag:", ignoreCase = true) &&
+                part.substringAfter(':').equals(token, ignoreCase = true)
+        }
+        .joinToString(" ")
+        .trim()
+        .let { if (it.isBlank()) "" else "$it " }
+}
+
+internal fun catalogFilterLabels(entries: List<CatalogSearchEntry>): List<String> =
+    entries.asSequence()
+        .flatMap { it.tagLabels.asSequence() }
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinctBy { catalogTagFilterToken(it) }
+        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it })
+        .toList()
+
+private fun tagFilterLabelForToken(token: String, allLabels: List<String>): String =
+    allLabels.firstOrNull { catalogTagFilterToken(it).equals(token, ignoreCase = true) } ?: token
+
+internal data class CatalogInstallKey(
+    val source: CatalogSource,
+    val sourceId: String,
+)
+
+internal fun catalogInstallKey(entry: SourceCatalogEntry): CatalogInstallKey =
+    CatalogInstallKey(entry.source, entry.sourceId)
+
+internal fun catalogInstallKeys(mapping: AppMapping): Set<CatalogInstallKey> = buildSet {
+    val mappedSource = mapping.mappedCatalogSource
+    val mappedSourceId = mapping.mappedCatalogSourceId?.takeIf { it.isNotBlank() }
+    if (mappedSource != null && mappedSourceId != null) {
+        add(CatalogInstallKey(mappedSource, mappedSourceId))
+    }
+    val f95ThreadId = mapping.threadId ?: F95UrlParser.extractThreadId(mapping.f95Url)
+    if (f95ThreadId != null) {
+        add(CatalogInstallKey(CatalogSource.F95Zone, f95ThreadId.toString()))
+    }
+}
+
+internal fun catalogInstallUrls(mapping: AppMapping): Set<String> = buildSet {
+    mapping.mappedCatalogUrl?.takeIf { it.isNotBlank() }?.let(::add)
+    mapping.f95Url?.takeIf { it.isNotBlank() }?.let(::add)
+}
 
 private fun formatIsoDate(value: String): String =
     value.take(10).ifBlank { value }
