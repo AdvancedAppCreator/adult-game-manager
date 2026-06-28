@@ -474,21 +474,37 @@ class CatalogRepository(private val context: Context) {
                 resp.body?.bytes() ?: error("empty source catalog index")
             }
             sourceIndexFile.writeBytes(indexBytes)
-            val index = indexBytes.inputStream().use { json.decodeFromStream<SourceCatalogIndex>(it) }
+            val registry = indexBytes.inputStream().use { json.decodeFromStream<CatalogSourceRegistry>(it) }
+            SourceRegistry.update(registry.catalogs)
             sourceCatalogDir.mkdirs()
             var totalBytes = indexBytes.size.toLong()
             var totalCount = 0
-            for (catalog in index.catalogs) {
+            // Files we intend to keep this sync. Anything else in the dir (a source that
+            // became disabled, raised its minAppVersion above ours, or dropped out of the
+            // registry entirely) is stale and must be deleted, or allSourceEntries() would
+            // keep rendering it from a previously-synced file.
+            val keepFiles = mutableSetOf<String>()
+            for (catalog in registry.catalogs) {
+                if (!catalog.enabled) continue
+                if (!appVersionSatisfies(catalog.minAppVersion)) {
+                    AppLog.i("Catalog", "Skipping source ${catalog.id}: requires app >= ${catalog.minAppVersion}")
+                    continue
+                }
                 val catalogUrl = catalog.url.trim()
                 if (catalogUrl.isBlank()) continue
                 val bytes = client.newCall(Request.Builder().url(catalogUrl).build()).execute().use { resp ->
-                    if (!resp.isSuccessful) error("${catalog.source.displayName} HTTP ${resp.code}")
-                    resp.body?.bytes() ?: error("empty ${catalog.source.displayName} catalog")
+                    if (!resp.isSuccessful) error("${catalog.id.sourceDisplayName} HTTP ${resp.code}")
+                    resp.body?.bytes() ?: error("empty ${catalog.id.sourceDisplayName} catalog")
                 }
-                File(sourceCatalogDir, "${catalog.source.name.lowercase()}.json").writeBytes(bytes)
+                val fileName = "${catalog.id.lowercase()}.json"
+                File(sourceCatalogDir, fileName).writeBytes(bytes)
+                keepFiles += fileName
                 totalBytes += bytes.size
                 totalCount += catalog.count ?: countSourceEntries(bytes)
             }
+            sourceCatalogDir.listFiles { f -> f.isFile && f.name.endsWith(".json") }
+                ?.filterNot { it.name in keepFiles }
+                ?.forEach { it.delete() }
             invalidateIndex()
             CatalogSyncResult.Updated(totalCount, totalBytes)
         }.getOrElse {
@@ -509,7 +525,7 @@ class CatalogRepository(private val context: Context) {
     @Volatile private var cachedIndex:  Map<String, List<CatalogGame>>? = null
     @Volatile private var cachedById:   Map<Int, CatalogGame>? = null
     @Volatile private var cachedAll:    List<CatalogGame>? = null
-    @Volatile private var cachedLabels: CatalogLabels? = null
+    @Volatile private var cachedLabels: CatalogLabelsV2? = null
     @Volatile private var cachedSourceEntries: List<SourceCatalogEntry>? = null
     // Pre-computed (titleWords, game) for the whole catalog, and a first-word bucket
     // index. fuzzyTitleMatch is prefix-only, so candidates must share words[0] with the
@@ -566,19 +582,36 @@ class CatalogRepository(private val context: Context) {
         val sourceGames = allSourceEntries().map { it.toCatalogGame() }
         if (sourceGames.isEmpty()) return legacyGames
         val sourceF95ThreadIds = sourceGames
-            .filter { it.source == CatalogSource.F95Zone && it.thread_id > 0 }
+            .filter { it.source == SOURCE_F95ZONE && it.thread_id > 0 }
             .map { it.thread_id }
             .toSet()
         return sourceGames + legacyGames.filterNot { it.thread_id in sourceF95ThreadIds }
     }
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-    suspend fun sourceCatalogIndex(): SourceCatalogIndex? = withContext(Dispatchers.IO) {
+    suspend fun sourceCatalogIndex(): CatalogSourceRegistry? = withContext(Dispatchers.IO) {
         val f = sourceIndexFile
         if (!f.exists() || f.length() == 0L) return@withContext null
-        runCatching { f.inputStream().use { json.decodeFromStream<SourceCatalogIndex>(it) } }
+        runCatching { f.inputStream().use { json.decodeFromStream<CatalogSourceRegistry>(it) } }
+            .onSuccess { SourceRegistry.update(it.catalogs) }
             .onFailure { AppLog.e("Catalog", "source catalog index parse failed", it) }
             .getOrNull()
+    }
+
+    /** True when the installed app version is >= [minAppVersion] (null/blank = no gate). */
+    private fun appVersionSatisfies(minAppVersion: String?): Boolean {
+        val min = minAppVersion?.trim()?.takeIf { it.isNotEmpty() } ?: return true
+        return compareSemver(BuildConfig.VERSION_NAME, min) >= 0
+    }
+
+    private fun compareSemver(a: String, b: String): Int {
+        val pa = a.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        val pb = b.split('.').map { it.takeWhile(Char::isDigit).toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(pa.size, pb.size)) {
+            val c = compareValues(pa.getOrElse(i) { 0 }, pb.getOrElse(i) { 0 })
+            if (c != 0) return c
+        }
+        return 0
     }
 
     suspend fun allSourceEntries(): List<SourceCatalogEntry> = withContext(Dispatchers.IO) {
@@ -593,7 +626,7 @@ class CatalogRepository(private val context: Context) {
             }
             entries.sortedWith(
                 compareBy<SourceCatalogEntry> { it.title.lowercase() }
-                    .thenBy { it.source.displayName }
+                    .thenBy { it.source.sourceDisplayName }
                     .thenBy { it.sourceId }
             ).also { cachedSourceEntries = it }
         }
@@ -970,12 +1003,12 @@ class CatalogRepository(private val context: Context) {
     }
 
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
-    suspend fun labels(): CatalogLabels = withContext(Dispatchers.IO) {
+    suspend fun labels(): CatalogLabelsV2 = withContext(Dispatchers.IO) {
         cachedLabels ?: run {
             val f = labelsFile
             val l = if (f.exists()) runCatching {
-                f.inputStream().use { json.decodeFromStream<CatalogLabels>(it) }
-            }.getOrDefault(CatalogLabels()) else CatalogLabels()
+                f.inputStream().use { json.decodeFromStream<CatalogLabelsV2>(it) }
+            }.getOrDefault(CatalogLabelsV2()) else CatalogLabelsV2()
             cachedLabels = l
             l
         }
@@ -992,8 +1025,12 @@ class CatalogRepository(private val context: Context) {
     }
 
     private fun SourceCatalogEntry.toCatalogGame(): CatalogGame {
-        val f95ThreadId = if (source == CatalogSource.F95Zone) sourceId.toIntOrNull() else null
-        val syntheticId = -((("${source.name}:$sourceId".hashCode() and Int.MAX_VALUE).takeIf { it > 0 }) ?: 1)
+        val f95ThreadId = if (source == SOURCE_F95ZONE) sourceId.toIntOrNull() else null
+        // Deterministic negative synthetic id for non-F95 entries. Kept (not a workaround
+        // to remove): CatalogGame.thread_id is an Int identity persisted in AppMapping; a
+        // stable hash of "source:sourceId" preserves back-compat for already-saved non-F95
+        // mappings. Robust identity is (source, sourceId), also persisted on the mapping.
+        val syntheticId = -((("$source:$sourceId".hashCode() and Int.MAX_VALUE).takeIf { it > 0 }) ?: 1)
         return CatalogGame(
             thread_id = f95ThreadId ?: syntheticId,
             title = title,

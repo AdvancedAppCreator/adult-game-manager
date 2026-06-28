@@ -15,17 +15,14 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
-@Serializable
-enum class CatalogSource(val displayName: String) {
-    @SerialName("f95zone")
-    F95Zone("F95Zone"),
-    @SerialName("adultgameworld")
-    AdultGameWorld("AdultGameWorld"),
-}
+/** Canonical id of the primary source. Sources are data-driven (string ids resolved
+ *  against the downloaded registry), so adding a new source needs no new app build. */
+const val SOURCE_F95ZONE = "f95zone"
+const val SOURCE_ADULTGAMEWORLD = "adultgameworld"
 
 @Serializable
 data class SourceCatalogEntry(
-    val source: CatalogSource,
+    val source: String,
     val sourceId: String,
     val canonicalUrl: String,
     val title: String,
@@ -64,25 +61,70 @@ object LooseStringListSerializer : KSerializer<List<String>> {
 data class SourceCatalogEnvelope(
     val schemaVersion: Int = 1,
     val generatedAt: String,
-    val source: CatalogSource,
+    val source: String,
     val count: Int,
     val entries: List<SourceCatalogEntry>,
 )
 
+/** v2 catalog registry (index-v2.json). The crawler emits one entry per source from
+ *  its server-side registry; the app renders sources generically from these fields,
+ *  so a brand-new source appears with NO new app build. */
 @Serializable
-data class SourceCatalogIndex(
-    val schemaVersion: Int = 1,
-    val generatedAt: String,
-    val catalogs: List<SourceCatalogIndexEntry>,
+data class CatalogSourceRegistry(
+    val schemaVersion: Int = 2,
+    val generatedAt: String = "",
+    val catalogs: List<CatalogSourceInfo> = emptyList(),
 )
 
 @Serializable
-data class SourceCatalogIndexEntry(
-    val source: CatalogSource,
-    val url: String,
-    val generatedAt: String? = null,
+data class CatalogSourceInfo(
+    val id: String,
+    val displayName: String = "",
+    val url: String = "",
     val count: Int? = null,
+    val generatedAt: String? = null,
+    val enabled: Boolean = true,
+    val priority: Int = 0,
+    /** Builds a canonical URL from an entry's sourceId via the "{id}" placeholder;
+     *  null when entries already carry an absolute canonicalUrl. */
+    val threadUrlTemplate: String? = null,
+    /** Minimum app version that can render this source; null = any v2 client. */
+    val minAppVersion: String? = null,
 )
+
+/** Runtime view of the downloaded source registry. Populated by [CatalogRepository]
+ *  on load/sync and consulted wherever the app needs per-source display name, thread
+ *  URL, priority, or gating — replacing the old closed enum + hardcoded source logic. */
+object SourceRegistry {
+    @Volatile private var infos: Map<String, CatalogSourceInfo> = emptyMap()
+
+    fun update(catalogs: List<CatalogSourceInfo>) {
+        infos = catalogs.associateBy { it.id }
+    }
+
+    fun all(): List<CatalogSourceInfo> = infos.values.sortedByDescending { it.priority }
+    fun info(id: String): CatalogSourceInfo? = infos[id]
+
+    fun displayName(id: String): String =
+        infos[id]?.displayName?.takeIf { it.isNotBlank() }
+            ?: id.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+    fun priority(id: String): Int = infos[id]?.priority ?: 0
+    fun isEnabled(id: String): Boolean = infos[id]?.enabled ?: true
+    fun minAppVersion(id: String): String? = infos[id]?.minAppVersion?.takeIf { it.isNotBlank() }
+
+    /** Canonical URL for an entry whose own canonicalUrl is blank, using the source's
+     *  thread-URL template. Returns null when no template is registered. */
+    fun threadUrl(id: String, sourceId: String?): String? {
+        val template = infos[id]?.threadUrlTemplate?.takeIf { it.isNotBlank() } ?: return null
+        if (sourceId.isNullOrBlank()) return null
+        return template.replace("{id}", sourceId)
+    }
+}
+
+/** Display name for a source id, resolved from the downloaded registry (falls back to
+ *  a capitalized id before the registry has loaded). */
+val String.sourceDisplayName: String get() = SourceRegistry.displayName(this)
 
 data class AdultGameWorldTitleParts(
     val gameTitle: String,
@@ -121,13 +163,8 @@ object LatestReleaseSelector {
                 .takeIf { it != 0 }
                 ?: compareValues(left.modifiedAt ?: left.publishedAt ?: "", right.modifiedAt ?: right.publishedAt ?: "")
                     .takeIf { it != 0 }
-                ?: compareValues(sourcePriority(left.source), sourcePriority(right.source))
+                ?: compareValues(SourceRegistry.priority(left.source), SourceRegistry.priority(right.source))
         }
-    }
-
-    private fun sourcePriority(source: CatalogSource): Int = when (source) {
-        CatalogSource.F95Zone -> 2
-        CatalogSource.AdultGameWorld -> 1
     }
 
     private fun comparableVersionScore(versionText: String?): List<Int> =

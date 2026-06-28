@@ -2,9 +2,23 @@ package com.example.f95updater
 
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SourceCatalogTest {
+    private val labelsV2 = CatalogLabelsV2(
+        sources = mapOf(
+            SOURCE_F95ZONE to SourceLabels(
+                prefixes = mapOf("7" to "Ren'Py", "2" to "RPGM"),
+                tags = mapOf("130" to "Male Protagonist", "999" to "Unused Label"),
+            ),
+            "dikgames" to SourceLabels(
+                // Same numeric id, different meaning — must never collide with f95.
+                tags = mapOf("7" to "Anal"),
+            ),
+        ),
+    )
+
     @Test
     fun adultGameWorldTitleParserExtractsVersionAndDeveloper() {
         val parsed = AdultGameWorldTitleParser.parse("Guilty Pleasure – New Version 0.60 [Quonix]")
@@ -17,7 +31,7 @@ class SourceCatalogTest {
     @Test
     fun latestReleaseSelectorChoosesHigherParsedVersion() {
         val f95 = SourceCatalogEntry(
-            source = CatalogSource.F95Zone,
+            source = SOURCE_F95ZONE,
             sourceId = "1",
             canonicalUrl = "https://f95zone.to/threads/1/",
             title = "Example",
@@ -25,7 +39,7 @@ class SourceCatalogTest {
             modifiedAt = "2026-05-20T00:00:00Z",
         )
         val agw = SourceCatalogEntry(
-            source = CatalogSource.AdultGameWorld,
+            source = SOURCE_ADULTGAMEWORLD,
             sourceId = "2",
             canonicalUrl = "https://adultgamesworld.com/example/",
             title = "Example",
@@ -37,36 +51,78 @@ class SourceCatalogTest {
     }
 
     @Test
-    fun generatedCatalogIndexRoundTrips() {
-        val original = SourceCatalogIndex(
+    fun latestReleaseSelectorBreaksVersionDateTieByRegistryPriority() {
+        SourceRegistry.update(
+            listOf(
+                CatalogSourceInfo(id = SOURCE_F95ZONE, priority = 100),
+                CatalogSourceInfo(id = SOURCE_ADULTGAMEWORLD, priority = 10),
+            ),
+        )
+        val f95 = SourceCatalogEntry(
+            source = SOURCE_F95ZONE, sourceId = "1",
+            canonicalUrl = "https://f95zone.to/threads/1/", title = "Example",
+            versionText = "v1.0", modifiedAt = "2026-05-20T00:00:00Z",
+        )
+        val agw = SourceCatalogEntry(
+            source = SOURCE_ADULTGAMEWORLD, sourceId = "2",
+            canonicalUrl = "https://adultgamesworld.com/example/", title = "Example",
+            versionText = "v1.0", modifiedAt = "2026-05-20T00:00:00Z",
+        )
+
+        assertEquals(f95, LatestReleaseSelector.choose(listOf(agw, f95)))
+    }
+
+    @Test
+    fun catalogSourceRegistryRoundTrips() {
+        val original = CatalogSourceRegistry(
             generatedAt = "2026-05-27T00:00:00Z",
             catalogs = listOf(
-                SourceCatalogIndexEntry(
-                    source = CatalogSource.AdultGameWorld,
+                CatalogSourceInfo(
+                    id = SOURCE_ADULTGAMEWORLD,
+                    displayName = "Adult Game World",
                     url = "https://example.test/catalogs/adultgameworld/catalog.json.gz",
                     count = 42,
+                    enabled = true,
+                    priority = 50,
+                    threadUrlTemplate = "https://adultgamesworld.com/{id}/",
+                    minAppVersion = "1.1.0",
                 ),
             ),
         )
 
-        val json = Json.encodeToString(SourceCatalogIndex.serializer(), original)
-        assertEquals(original, Json.decodeFromString(SourceCatalogIndex.serializer(), json))
+        val json = Json.encodeToString(CatalogSourceRegistry.serializer(), original)
+        assertEquals(original, Json.decodeFromString(CatalogSourceRegistry.serializer(), json))
     }
 
     @Test
-    fun displayTagsHidesUnknownNumericIds() {
-        val entry = SourceCatalogEntry(
-            source = CatalogSource.F95Zone,
-            sourceId = "1",
-            canonicalUrl = "https://f95zone.to/threads/1/",
-            title = "Example",
+    fun registryDecodeIgnoresUnknownFieldsAndKeepsFutureSources() {
+        // A future source id the app has never heard of must decode (string model), not throw.
+        val raw = """
+            {"schemaVersion":2,"generatedAt":"t","catalogs":[
+              {"id":"brandnewsource","displayName":"Brand New","url":"u","futureField":true}
+            ]}
+        """.trimIndent()
+        val json = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true }
+        val registry = json.decodeFromString(CatalogSourceRegistry.serializer(), raw)
+        assertEquals("brandnewsource", registry.catalogs.single().id)
+    }
+
+    @Test
+    fun displayTagsResolvesPerSourceWithoutCrossSourceCollision() {
+        val f95 = SourceCatalogEntry(
+            source = SOURCE_F95ZONE, sourceId = "1",
+            canonicalUrl = "https://f95zone.to/threads/1/", title = "Example",
             tags = listOf("7", "999999", "custom text"),
         )
-        val labels = CatalogLabels(
-            prefixes = mapOf("7" to "Ren'Py"),
-        )
+        assertEquals(listOf("Ren'Py", "custom text"), displayTags(f95, labelsV2))
 
-        assertEquals(listOf("Ren'Py", "custom text"), displayTags(entry, labels))
+        // Same numeric id "7" resolves to the dikgames-scoped label, not f95's.
+        val dik = SourceCatalogEntry(
+            source = "dikgames", sourceId = "9",
+            canonicalUrl = "https://dikgames.com/9/", title = "Example",
+            tags = listOf("7"),
+        )
+        assertEquals(listOf("Anal"), displayTags(dik, labelsV2))
     }
 
     @Test
@@ -86,41 +142,33 @@ class SourceCatalogTest {
     @Test
     fun catalogSearchEntryCachesResolvedTagTokens() {
         val entry = SourceCatalogEntry(
-            source = CatalogSource.F95Zone,
+            source = SOURCE_F95ZONE,
             sourceId = "1",
             canonicalUrl = "https://f95zone.to/threads/1/",
             title = "Example",
             tags = listOf("7", "130"),
         )
-        val labels = CatalogLabels(
-            prefixes = mapOf("7" to "Ren'Py"),
-            tags = mapOf("130" to "Male Protagonist"),
-        )
 
-        val indexed = CatalogSearchEntry.from(entry, labels)
+        val indexed = CatalogSearchEntry.from(entry, labelsV2)
 
         assertEquals(setOf(7, 130), indexed.numericTagIds)
-        assertEquals(true, indexed.tagTokens.contains("male-protagonist"))
-        assertEquals(true, indexed.tagTokens.contains("male protagonist"))
-        assertEquals(true, indexed.tagTokens.contains("ren-py"))
+        assertTrue(indexed.tagTokens.contains("male-protagonist"))
+        assertTrue(indexed.tagTokens.contains("male protagonist"))
+        assertTrue(indexed.tagTokens.contains("ren-py"))
     }
 
     @Test
     fun catalogFilterLabelsOnlyIncludesTagsPresentInEntries() {
-        val labels = CatalogLabels(
-            prefixes = mapOf("7" to "Ren'Py", "2" to "RPGM"),
-            tags = mapOf("130" to "Male Protagonist", "999" to "Unused Label"),
-        )
         val entries = listOf(
             CatalogSearchEntry.from(
                 SourceCatalogEntry(
-                    source = CatalogSource.F95Zone,
+                    source = SOURCE_F95ZONE,
                     sourceId = "1",
                     canonicalUrl = "https://f95zone.to/threads/1/",
                     title = "Example",
                     tags = listOf("7", "130"),
                 ),
-                labels,
+                labelsV2,
             ),
         )
 

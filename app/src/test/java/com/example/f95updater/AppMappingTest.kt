@@ -47,7 +47,7 @@ class AppMappingTest {
 
         assertTrue(
             catalogInstallKeys(mapping).contains(
-                CatalogInstallKey(CatalogSource.F95Zone, "12345"),
+                CatalogInstallKey(SOURCE_F95ZONE, "12345"),
             ),
         )
     }
@@ -56,14 +56,14 @@ class AppMappingTest {
     fun catalogInstallKeysIncludeSourceAwareMapping() {
         val mapping = AppMapping(
             packageName = "pkg.test",
-            mappedCatalogSource = CatalogSource.AdultGameWorld,
+            mappedCatalogSource = SOURCE_ADULTGAMEWORLD,
             mappedCatalogSourceId = "agw-example",
             mappedCatalogUrl = "https://adultgamesworld.com/agw-example/",
         )
 
         assertTrue(
             catalogInstallKeys(mapping).contains(
-                CatalogInstallKey(CatalogSource.AdultGameWorld, "agw-example"),
+                CatalogInstallKey(SOURCE_ADULTGAMEWORLD, "agw-example"),
             ),
         )
         assertTrue(catalogInstallUrls(mapping).contains("https://adultgamesworld.com/agw-example/"))

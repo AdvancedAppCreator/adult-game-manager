@@ -94,9 +94,9 @@ data class AppConfig(
         const val DEFAULT_CATALOG_URL =
             "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/catalog.json.gz"
         const val DEFAULT_CATALOG_INDEX_URL =
-            "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/catalogs-index.json"
+            "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/catalogs-index-v2.json"
         const val DEFAULT_LABELS_URL =
-            "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/labels.json"
+            "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/labels-v2.json"
         const val DEFAULT_VERSION_INFO_URL =
             "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/app/version.json"
         /** The in-app About support link. */

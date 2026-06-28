@@ -22,6 +22,8 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 
 enum class CatalogSortKey(val label: String) {
@@ -54,7 +56,7 @@ private val PLATFORM_FILTERS = listOf("Android", "Windows", "Mac", "Linux")
 @Composable
 fun CatalogScreen(
     catalog: CatalogRepository,
-    labels: CatalogLabels?,
+    labels: CatalogLabelsV2?,
     mappings: Map<String, AppMapping>,
     screenshotQuery: String? = null,
     onOpenThread: (String) -> Unit,
@@ -110,7 +112,7 @@ fun CatalogScreen(
     var statusFilter by remember { mutableStateOf<Int?>(null) }   // 18/20/22 or null
     var engineFilter by remember { mutableStateOf<Int?>(null) }   // engine prefix id or null
     var categoryFilter by remember { mutableStateOf<String?>(null) } // "games"/"mods"/...
-    var sourceFilter by remember { mutableStateOf<CatalogSource?>(null) }
+    var sourceFilter by remember { mutableStateOf<String?>(null) }
     var platformFilter by remember { mutableStateOf<String?>(null) }
     var minRating by remember { mutableStateOf(0f) }
     var installedOnly by remember { mutableStateOf(false) }
@@ -165,55 +167,67 @@ fun CatalogScreen(
     }
 
     var detailGame by remember { mutableStateOf<SourceCatalogEntry?>(null) }
-    val searchEntries = remember(allEntries, labels) {
-        allEntries.map { CatalogSearchEntry.from(it, labels) }
+    // Building search rows for the whole catalog (~40k entries) is O(n) work that must
+    // never run on the UI thread, or the catalog tab hangs on open. Compute on a worker
+    // dispatcher and publish into state; the list renders as soon as the rows are ready.
+    var searchEntries by remember { mutableStateOf<List<CatalogSearchEntry>>(emptyList()) }
+    LaunchedEffect(allEntries, labels) {
+        searchEntries = withContext(Dispatchers.Default) {
+            allEntries.map { CatalogSearchEntry.from(it, labels) }
+        }
     }
-    val availableCatalogTagLabels = remember(searchEntries) {
-        catalogFilterLabels(searchEntries)
+    val availableCatalogTagLabels by produceState(emptyList<String>(), searchEntries) {
+        value = withContext(Dispatchers.Default) { catalogFilterLabels(searchEntries) }
     }
 
-    val filteredAndSorted: List<SourceCatalogEntry> = remember(
+    val filteredAndSorted: List<SourceCatalogEntry> by produceState(
+        emptyList(),
         searchEntries, debouncedQuery, sortKey, sortDesc,
         statusFilter, engineFilter, categoryFilter, sourceFilter, platformFilter, minRating,
         installedOnly, notInstalledOnly, installedCatalogKeys, installedCatalogUrls,
     ) {
-        if (searchEntries.isEmpty()) return@remember emptyList()
-        val parsed = parseSearchQuery(debouncedQuery)
-        val freeText = parsed.freeText.lowercase()
-        var seq = searchEntries.asSequence()
-        if (freeText.isNotEmpty()) {
-            seq = seq.filter { item ->
-                item.titleLower.contains(freeText) ||
-                    item.developerLower.contains(freeText) ||
-                    item.sourceLower.contains(freeText)
+        value = withContext(Dispatchers.Default) {
+            if (searchEntries.isEmpty()) return@withContext emptyList()
+            val parsed = parseSearchQuery(debouncedQuery)
+            val freeText = parsed.freeText.lowercase()
+            var seq = searchEntries.asSequence()
+            if (freeText.isNotEmpty()) {
+                seq = seq.filter { item ->
+                    item.titleLower.contains(freeText) ||
+                        item.developerLower.contains(freeText) ||
+                        item.sourceLower.contains(freeText)
+                }
             }
-        }
-        if (parsed.tags.isNotEmpty()) {
-            seq = seq.filter { item ->
-                item.tagTokens.isNotEmpty() &&
-                    parsed.tags.all { tq -> item.tagTokens.any { tag -> tag.contains(tq) } }
+            if (parsed.tags.isNotEmpty()) {
+                seq = seq.filter { item ->
+                    item.tagTokens.isNotEmpty() &&
+                        parsed.tags.all { tq -> item.tagTokens.any { tag -> tag.contains(tq) } }
+                }
             }
-        }
-        statusFilter?.let { sf -> seq = seq.filter { sf in it.numericTagIds } }
-        engineFilter?.let { ef -> seq = seq.filter { ef in it.numericTagIds } }
-        categoryFilter?.let { cf -> seq = seq.filter { item -> item.entry.tags.any { tag -> tag.equals(cf, ignoreCase = true) } } }
-        sourceFilter?.let { sf -> seq = seq.filter { it.entry.source == sf } }
-        platformFilter?.let { pf -> seq = seq.filter { item -> item.entry.platforms.any { platformMatches(it, pf) } } }
-        if (minRating > 0f) seq = seq.filter { (it.entry.rating ?: 0.0) >= minRating }
-        if (installedOnly) seq = seq.filter { isInstalled(it.entry) }
-        if (notInstalledOnly) seq = seq.filterNot { isInstalled(it.entry) }
+            // Status/engine filters use F95 prefix ids (KnownPrefixes), which live in the
+            // f95zone namespace; restrict them to f95 entries so a numerically-equal id from
+            // another source can never falsely match.
+            statusFilter?.let { sf -> seq = seq.filter { it.entry.source == SOURCE_F95ZONE && sf in it.numericTagIds } }
+            engineFilter?.let { ef -> seq = seq.filter { it.entry.source == SOURCE_F95ZONE && ef in it.numericTagIds } }
+            categoryFilter?.let { cf -> seq = seq.filter { item -> item.entry.tags.any { tag -> tag.equals(cf, ignoreCase = true) } } }
+            sourceFilter?.let { sf -> seq = seq.filter { it.entry.source == sf } }
+            platformFilter?.let { pf -> seq = seq.filter { item -> item.entry.platforms.any { platformMatches(it, pf) } } }
+            if (minRating > 0f) seq = seq.filter { (it.entry.rating ?: 0.0) >= minRating }
+            if (installedOnly) seq = seq.filter { isInstalled(it.entry) }
+            if (notInstalledOnly) seq = seq.filterNot { isInstalled(it.entry) }
 
-        val sorted = when (sortKey) {
-            CatalogSortKey.Title -> seq.sortedBy { it.titleLower }
-            CatalogSortKey.Rating -> seq.sortedWith(
-                compareBy({ it.entry.rating ?: 0.0 }, { it.entry.popularity ?: 0.0 })
-            )
-            CatalogSortKey.Updated -> seq.sortedBy { it.entry.modifiedAt ?: it.entry.publishedAt ?: "" }
-            CatalogSortKey.Newest -> seq.sortedBy { it.entry.publishedAt ?: it.entry.modifiedAt ?: "" }
-            CatalogSortKey.Views -> seq.sortedBy { it.entry.popularity ?: 0.0 }
-            CatalogSortKey.Likes -> seq.sortedBy { it.entry.popularity ?: 0.0 }
-        }.map { it.entry }.toList()
-        if (sortDesc) sorted.reversed() else sorted
+            val sorted = when (sortKey) {
+                CatalogSortKey.Title -> seq.sortedBy { it.titleLower }
+                CatalogSortKey.Rating -> seq.sortedWith(
+                    compareBy({ it.entry.rating ?: 0.0 }, { it.entry.popularity ?: 0.0 })
+                )
+                CatalogSortKey.Updated -> seq.sortedBy { it.entry.modifiedAt ?: it.entry.publishedAt ?: "" }
+                CatalogSortKey.Newest -> seq.sortedBy { it.entry.publishedAt ?: it.entry.modifiedAt ?: "" }
+                CatalogSortKey.Views -> seq.sortedBy { it.entry.popularity ?: 0.0 }
+                CatalogSortKey.Likes -> seq.sortedBy { it.entry.popularity ?: 0.0 }
+            }.map { it.entry }.toList()
+            if (sortDesc) sorted.reversed() else sorted
+        }
     }
 
     Scaffold(
@@ -306,7 +320,7 @@ fun CatalogScreen(
                 if (labels == null) return@remember emptyList()
                 val match = TAG_TOKEN_AT_END.find(query) ?: return@remember emptyList()
                 val prefix = match.groupValues[1].lowercase()
-                (labels.tags.values.asSequence() + labels.prefixes.values.asSequence())
+                labels.allLabelNames.asSequence()
                     .filter { it.startsWith(prefix, ignoreCase = true) }
                     .distinct()
                     .sortedBy { it.length }
@@ -378,7 +392,7 @@ fun CatalogScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 4.dp, top = 4.dp, end = 4.dp, bottom = 96.dp),
                 ) {
-                    items(filteredAndSorted, key = { "${it.source.name}:${it.sourceId}" }) { g ->
+                    items(filteredAndSorted, key = { "${it.source}:${it.sourceId}" }) { g ->
                         CatalogRowCard(
                             entry = g,
                             labels = labels,
@@ -418,7 +432,7 @@ private fun CatalogFilters(
     statusFilter: Int?, onStatusChange: (Int?) -> Unit,
     engineFilter: Int?, onEngineChange: (Int?) -> Unit,
     categoryFilter: String?, onCategoryChange: (String?) -> Unit,
-    sourceFilter: CatalogSource?, onSourceChange: (CatalogSource?) -> Unit,
+    sourceFilter: String?, onSourceChange: (String?) -> Unit,
     platformFilter: String?, onPlatformChange: (String?) -> Unit,
     minRating: Float, onMinRatingChange: (Float) -> Unit,
     installedOnly: Boolean, onInstalledOnlyChange: (Boolean) -> Unit,
@@ -464,7 +478,7 @@ private fun CatalogFilters(
                         leadingIcon = { Icon(Icons.Default.Source, null, modifier = Modifier.size(16.dp)) },
                         label = {
                             Text(
-                                sourceFilter?.displayName ?: "Source",
+                                sourceFilter?.sourceDisplayName ?: "Source",
                                 fontSize = 11.sp,
                             )
                         },
@@ -480,9 +494,11 @@ private fun CatalogFilters(
                                 sourceMenuOpen = false
                             },
                         )
-                        CatalogSource.values().forEach { source ->
+                        val sourceIds = SourceRegistry.all().map { it.id }
+                            .ifEmpty { listOf(SOURCE_F95ZONE, SOURCE_ADULTGAMEWORLD) }
+                        sourceIds.forEach { source ->
                             DropdownMenuItem(
-                                text = { Text(source.displayName) },
+                                text = { Text(source.sourceDisplayName) },
                                 leadingIcon = {
                                     if (sourceFilter == source) {
                                         Icon(Icons.Default.Check, null)
@@ -749,7 +765,7 @@ private fun StatusFilterChip(id: Int, statusFilter: Int?, onStatusChange: (Int?)
 @Composable
 private fun CatalogRowCard(
     entry: SourceCatalogEntry,
-    labels: CatalogLabels?,
+    labels: CatalogLabelsV2?,
     installed: Boolean,
     onClick: () -> Unit,
     onOpen: () -> Unit,
@@ -815,7 +831,7 @@ private fun CatalogRowCard(
                     AssistChip(
                         onClick = {},
                         enabled = false,
-                        label = { Text(entry.source.displayName, fontSize = 10.sp) },
+                        label = { Text(entry.source.sourceDisplayName, fontSize = 10.sp) },
                         modifier = Modifier.height(24.dp),
                     )
                     entry.rating?.let {
@@ -844,7 +860,7 @@ private fun CatalogRowCard(
 @Composable
 private fun CatalogDetailDialog(
     game: SourceCatalogEntry,
-    labels: CatalogLabels?,
+    labels: CatalogLabelsV2?,
     installed: Boolean,
     onDismiss: () -> Unit,
     onOpenThread: () -> Unit,
@@ -903,7 +919,7 @@ private fun CatalogDetailDialog(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    Text("Source: ${game.source.displayName}", style = MaterialTheme.typography.bodySmall)
+                    Text("Source: ${game.source.sourceDisplayName}", style = MaterialTheme.typography.bodySmall)
                     game.developer?.let { Text("Developer: $it", style = MaterialTheme.typography.bodySmall) }
                     game.versionText?.let { Text("Version: $it", style = MaterialTheme.typography.bodySmall) }
                     game.rating?.let { Text("Rating: %.2f / 5".format(it), style = MaterialTheme.typography.bodySmall) }
@@ -970,9 +986,9 @@ private fun CatalogDetailDialog(
 private fun sourceEntriesFromLegacyGames(games: List<CatalogGame>): List<SourceCatalogEntry> =
     games.map { game ->
         SourceCatalogEntry(
-            source = CatalogSource.F95Zone,
+            source = SOURCE_F95ZONE,
             sourceId = game.thread_id.toString(),
-            canonicalUrl = "https://f95zone.to/threads/${game.thread_id}/",
+            canonicalUrl = game.canonicalUrl,
             title = game.title,
             developer = game.creator,
             versionText = game.version,
@@ -1006,15 +1022,17 @@ private fun platformMatches(platform: String, filter: String): Boolean {
         (filter.equals("Windows", ignoreCase = true) && normalized == "windows/pc")
 }
 
-internal fun displayTags(entry: SourceCatalogEntry, labels: CatalogLabels?): List<String> =
-    entry.tags.mapNotNull { raw ->
+internal fun displayTags(entry: SourceCatalogEntry, labels: CatalogLabelsV2?): List<String> {
+    val sourceLabels = labels?.forSource(entry.source)
+    return entry.tags.mapNotNull { raw ->
         val id = raw.toIntOrNull()
         when {
-            id != null -> labels?.prefixes?.get(raw) ?: labels?.tags?.get(raw)
+            id != null -> sourceLabels?.prefixes?.get(raw) ?: sourceLabels?.tags?.get(raw)
             raw.isBlank() -> null
             else -> raw
         }
     }.distinct()
+}
 
 internal data class CatalogSearchEntry(
     val entry: SourceCatalogEntry,
@@ -1026,13 +1044,13 @@ internal data class CatalogSearchEntry(
     val numericTagIds: Set<Int>,
 ) {
     companion object {
-        fun from(entry: SourceCatalogEntry, labels: CatalogLabels?): CatalogSearchEntry {
+        fun from(entry: SourceCatalogEntry, labels: CatalogLabelsV2?): CatalogSearchEntry {
             val tagLabels = displayTags(entry, labels)
             return CatalogSearchEntry(
                 entry = entry,
                 titleLower = entry.title.lowercase(),
                 developerLower = entry.developer.orEmpty().lowercase(),
-                sourceLower = entry.source.displayName.lowercase(),
+                sourceLower = entry.source.sourceDisplayName.lowercase(),
                 tagLabels = tagLabels,
                 tagTokens = tagLabels.flatMap { catalogTagSearchTokens(it) }.toSet(),
                 numericTagIds = sourceTagIds(entry),
@@ -1097,7 +1115,7 @@ private fun tagFilterLabelForToken(token: String, allLabels: List<String>): Stri
     allLabels.firstOrNull { catalogTagFilterToken(it).equals(token, ignoreCase = true) } ?: token
 
 internal data class CatalogInstallKey(
-    val source: CatalogSource,
+    val source: String,
     val sourceId: String,
 )
 
@@ -1112,7 +1130,7 @@ internal fun catalogInstallKeys(mapping: AppMapping): Set<CatalogInstallKey> = b
     }
     val f95ThreadId = mapping.threadId ?: F95UrlParser.extractThreadId(mapping.f95Url)
     if (f95ThreadId != null) {
-        add(CatalogInstallKey(CatalogSource.F95Zone, f95ThreadId.toString()))
+        add(CatalogInstallKey(SOURCE_F95ZONE, f95ThreadId.toString()))
     }
 }
 

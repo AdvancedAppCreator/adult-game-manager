@@ -27,6 +27,9 @@ object JoiPlayMetadataCatalog {
 
     @Volatile private var cached: Loaded? = null
 
+    // Unicode-aware on purpose: keeps non-ASCII letters/digits so titles in non-Latin
+    // scripts still normalize sensibly. Deliberately NOT the ASCII-only
+    // CatalogRepository.normalizeTitle (which strips non-[a-z0-9]).
     private fun normalize(s: String): String =
         s.lowercase().filter { it.isLetterOrDigit() }
 

@@ -231,9 +231,9 @@ private fun AppMapping.withExternalSnapshot(result: ExternalMirrorResult): AppMa
     copy(
         mappedCatalogId = result.threadId ?: result.mirrorUrl.hashCode(),
         mappedCatalogSource = if (result.sourceHost.equals("adultgameworld.com", ignoreCase = true)) {
-            CatalogSource.AdultGameWorld
+            SOURCE_ADULTGAMEWORLD
         } else {
-            CatalogSource.F95Zone
+            SOURCE_F95ZONE
         },
         mappedCatalogSourceId = result.threadId?.toString(),
         mappedCatalogTitle = result.title,
@@ -250,9 +250,9 @@ private fun AppMapping.toCatalogSnapshot(): CatalogGame? {
     val id = mappedCatalogId ?: fallbackUrl?.hashCode() ?: return null
     val source = mappedCatalogSource
         ?: if (fallbackUrl?.contains("adultgameworld", ignoreCase = true) == true) {
-            CatalogSource.AdultGameWorld
+            SOURCE_ADULTGAMEWORLD
         } else {
-            CatalogSource.F95Zone
+            SOURCE_F95ZONE
         }
     return CatalogGame(
         thread_id = id,
@@ -653,8 +653,8 @@ fun AppRoot() {
     val compactHeight = LocalConfiguration.current.screenHeightDp < 600
     val catalog = remember { CatalogRepository(context.applicationContext) }
     val repo = remember { MappingRepository(context.applicationContext) }
-    var catalogLabels by remember { mutableStateOf<CatalogLabels?>(null) }
-    LaunchedEffect(Unit) { catalogLabels = catalog.labels() }
+    var catalogLabels by remember { mutableStateOf<CatalogLabelsV2?>(null) }
+    LaunchedEffect(Unit) { catalog.sourceCatalogIndex(); catalogLabels = catalog.labels() }
     LaunchedEffect(Unit) {
         yield()
         installedShellReady = true
@@ -811,8 +811,8 @@ private fun StartupPlaceholder() {
 fun InstalledScreen(
     catalog: CatalogRepository,
     sharedRepo: MappingRepository,
-    sharedLabels: CatalogLabels?,
-    onLabelsChange: (CatalogLabels?) -> Unit,
+    sharedLabels: CatalogLabelsV2?,
+    onLabelsChange: (CatalogLabelsV2?) -> Unit,
     onScreenshotTabChange: (Tab) -> Unit = {},
     onScreenshotCatalogQuery: (String?) -> Unit = {},
 ) {
@@ -2193,8 +2193,9 @@ fun InstalledScreen(
             val tid = mapping?.threadId ?: F95UrlParser.extractThreadId(mapping?.f95Url)
             val game = tid?.let { catalogById?.get(it) }
             val tagNames = if (game != null && catalogLabels != null) {
-                game.tags.mapNotNull { catalogLabels.tags[it.toString()]?.lowercase() } +
-                    game.prefixes.mapNotNull { catalogLabels.prefixes[it.toString()]?.lowercase() }
+                val sl = catalogLabels.forSource(game.source)
+                game.tags.mapNotNull { sl?.tags?.get(it.toString())?.lowercase() } +
+                    game.prefixes.mapNotNull { sl?.prefixes?.get(it.toString())?.lowercase() }
             } else emptyList()
             parsed.tags.all { tq -> tagNames.any { it.contains(tq) } }
         }
@@ -3445,7 +3446,7 @@ fun InstalledScreen(
                 val labels = catalogLabels ?: return@remember emptyList()
                 val match = TAG_TOKEN_AT_END_APPS.find(nameFilter) ?: return@remember emptyList()
                 val prefix = match.groupValues[1].lowercase()
-                (labels.tags.values.asSequence() + labels.prefixes.values.asSequence())
+                labels.allLabelNames.asSequence()
                     .filter { it.startsWith(prefix, ignoreCase = true) }
                     .distinct()
                     .sortedBy { it.length }
@@ -6636,7 +6637,7 @@ private fun NiceGameCard(
     expanded: Boolean,
     catalogGame: CatalogGame?,
     catalogCover: String?,
-    catalogLabels: CatalogLabels?,
+    catalogLabels: CatalogLabelsV2?,
     selected: Boolean,
     selectionMode: Boolean,
     onToggleSelect: () -> Unit,
@@ -6708,7 +6709,7 @@ private fun NiceGameCard(
                     )
                 }
                 catalogGame?.let { cg ->
-                    val prefixNames = catalogLabels?.let { l -> cg.prefixes.mapNotNull { l.prefixes[it.toString()] } }
+                    val prefixNames = catalogLabels?.let { l -> cg.prefixes.mapNotNull { l.prefixName(cg.source, it.toString()) } }
                     if (!prefixNames.isNullOrEmpty()) {
                         Text(
                             prefixNames.joinToString(" • "),
@@ -6791,7 +6792,7 @@ private fun AppRowCard(
     expanded: Boolean,
     catalogGame: CatalogGame?,
     catalogCover: String?,
-    catalogLabels: CatalogLabels?,
+    catalogLabels: CatalogLabelsV2?,
     selected: Boolean,
     selectionMode: Boolean,
     onToggleSelect: () -> Unit,
@@ -6892,7 +6893,7 @@ private fun AppRowCard(
                     )
                 }
                 catalogGame?.let { cg ->
-                    val prefixNames = catalogLabels?.let { l -> cg.prefixes.mapNotNull { l.prefixes[it.toString()] } }
+                    val prefixNames = catalogLabels?.let { l -> cg.prefixes.mapNotNull { l.prefixName(cg.source, it.toString()) } }
                     if (!prefixNames.isNullOrEmpty()) {
                         Text(
                             prefixNames.joinToString(" • "),
@@ -7184,9 +7185,9 @@ private fun AppRowCard(
                     g.rating?.let { DetailRow("Rating", "%.2f / 5".format(it)) }
                     val labels = catalogLabels
                     if (labels != null) {
-                        val prefixNames = g.prefixes.mapNotNull { labels.prefixes[it.toString()] }
+                        val prefixNames = g.prefixes.mapNotNull { labels.prefixName(g.source, it.toString()) }
                         if (prefixNames.isNotEmpty()) DetailRow("Type", prefixNames.joinToString(" • "))
-                        val tagNames = g.tags.mapNotNull { labels.tags[it.toString()] }
+                        val tagNames = g.tags.mapNotNull { labels.tagName(g.source, it.toString()) }
                         if (tagNames.isNotEmpty()) DetailRow("Tags", tagNames.joinToString(", "))
                     }
                 }
@@ -10193,7 +10194,7 @@ private fun CatalogResultRow(game: CatalogGame, onClick: () -> Unit) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
             Text(game.title, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
             val sub = buildString {
-                append(game.source.displayName)
+                append(game.source.sourceDisplayName)
                 game.version?.takeIf { it.isNotBlank() }?.let {
                     if (isNotEmpty()) append(" \u2022 ")
                     append("v")
@@ -10761,7 +10762,7 @@ private fun AmbiguousCatalogDialog(
                                         append(it)
                                     }
                                     if (isNotEmpty()) append(" \u2022 ")
-                                    append(game.source.displayName).append(" id ").append(game.sourceId ?: game.thread_id.toString())
+                                    append(game.source.sourceDisplayName).append(" id ").append(game.sourceId ?: game.thread_id.toString())
                                 }
                                 Text(
                                     sub,
@@ -10840,7 +10841,7 @@ private fun UnmappedReviewDialog(
                                     Text(item.row.installed.label, fontWeight = FontWeight.Bold)
                                     Text(item.row.installed.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Text(
-                                        "Previously mapped to: ${game.title.ifBlank { "(untitled)" }} • ${game.source.displayName} id ${game.sourceId ?: game.thread_id.toString()}",
+                                        "Previously mapped to: ${game.title.ifBlank { "(untitled)" }} • ${game.source.sourceDisplayName} id ${game.sourceId ?: game.thread_id.toString()}",
                                         style = MaterialTheme.typography.bodySmall,
                                     )
                                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -10871,7 +10872,7 @@ private fun UnmappedReviewDialog(
                                     Text("Suggestions (${item.via})", style = MaterialTheme.typography.bodySmall)
                                     item.candidates.take(4).forEach { game ->
                                         TextButton(onClick = { onPick(item, game) }) {
-                                            Text("${game.title.ifBlank { "(untitled)" }} • ${game.source.displayName} id ${game.sourceId ?: game.thread_id.toString()}", maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            Text("${game.title.ifBlank { "(untitled)" }} • ${game.source.sourceDisplayName} id ${game.sourceId ?: game.thread_id.toString()}", maxLines = 2, overflow = TextOverflow.Ellipsis)
                                         }
                                     }
                                 }

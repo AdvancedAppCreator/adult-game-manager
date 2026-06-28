@@ -33,7 +33,7 @@ object CatalogPrefs {
         val statusFilter: Int?,
         val engineFilter: Int?,
         val categoryFilter: String?,
-        val sourceFilter: CatalogSource?,
+        val sourceFilter: String?,
         val platformFilter: String?,
         val minRating: Float,
         val installedOnly: Boolean,
@@ -65,14 +65,22 @@ object CatalogPrefs {
             statusFilter       = prefs[KEY_STATUS]?.takeIf { it != Int.MIN_VALUE },
             engineFilter       = prefs[KEY_ENGINE]?.takeIf { it != Int.MIN_VALUE },
             categoryFilter     = prefs[KEY_CATEGORY]?.takeIf { it.isNotEmpty() },
-            sourceFilter       = prefs[KEY_SOURCE]?.let { name ->
-                runCatching { CatalogSource.valueOf(name) }.getOrNull()
-            },
+            sourceFilter       = prefs[KEY_SOURCE]?.takeIf { it.isNotEmpty() }?.let(::migrateSourceFilter),
             platformFilter     = prefs[KEY_PLATFORM]?.takeIf { it.isNotEmpty() },
             minRating          = prefs[KEY_MIN_RATING] ?: DEFAULT.minRating,
             installedOnly      = prefs[KEY_INSTALLED_ONLY] ?: DEFAULT.installedOnly,
             notInstalledOnly   = prefs[KEY_NOT_INSTALLED_ONLY] ?: DEFAULT.notInstalledOnly,
         )
+    }
+
+    /** v1.0.91 persisted the source filter as the enum constant name ("F95Zone"/
+     *  "AdultGameWorld"); v2 compares against the lowercase data-driven source id. Map the
+     *  legacy values (and any other) to lowercase so an upgraded user's saved filter keeps
+     *  matching instead of silently hiding the whole catalog. */
+    private fun migrateSourceFilter(raw: String): String = when (raw) {
+        "F95Zone" -> SOURCE_F95ZONE
+        "AdultGameWorld" -> SOURCE_ADULTGAMEWORLD
+        else -> raw
     }
 
     suspend fun save(context: Context, s: State) {
@@ -83,7 +91,7 @@ object CatalogPrefs {
             if (s.statusFilter == null) prefs.remove(KEY_STATUS) else prefs[KEY_STATUS] = s.statusFilter
             if (s.engineFilter == null) prefs.remove(KEY_ENGINE) else prefs[KEY_ENGINE] = s.engineFilter
             if (s.categoryFilter.isNullOrEmpty()) prefs.remove(KEY_CATEGORY) else prefs[KEY_CATEGORY] = s.categoryFilter
-            if (s.sourceFilter == null) prefs.remove(KEY_SOURCE) else prefs[KEY_SOURCE] = s.sourceFilter.name
+            if (s.sourceFilter.isNullOrEmpty()) prefs.remove(KEY_SOURCE) else prefs[KEY_SOURCE] = s.sourceFilter
             if (s.platformFilter.isNullOrEmpty()) prefs.remove(KEY_PLATFORM) else prefs[KEY_PLATFORM] = s.platformFilter
             prefs[KEY_MIN_RATING]         = s.minRating
             prefs[KEY_INSTALLED_ONLY]     = s.installedOnly

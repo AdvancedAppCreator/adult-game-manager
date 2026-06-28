@@ -68,8 +68,7 @@ object VersionCompare {
         return suffix.toString()
     }
 
-    private fun normalize(s: String): String =
-        s.lowercase().replace(Regex("[^a-z0-9]"), "")
+    private fun normalize(s: String): String = CatalogRepository.normalizeTitle(s)
 
     /** Returns true if seen represents a different value than acknowledged. */
     fun differs(seen: String?, acknowledged: String?): Boolean {

@@ -77,7 +77,7 @@ data class AppMapping(
     val manualLocalIdentity: List<String> = emptyList(),
     /** Source-aware catalog id for manual/external mappings, including negative external ids. */
     val mappedCatalogId: Int? = null,
-    val mappedCatalogSource: CatalogSource? = null,
+    val mappedCatalogSource: String? = null,
     val mappedCatalogSourceId: String? = null,
     val mappedCatalogTitle: String = "",
     val mappedCatalogVersion: String? = null,
@@ -113,16 +113,18 @@ data class CatalogGame(
     val publishedAt: Long = 0L,
     val modifiedAt: Long = 0L,
     val cover: String? = null,
-    val source: CatalogSource = CatalogSource.F95Zone,
+    val source: String = SOURCE_F95ZONE,
     val sourceId: String? = null,
     val sourceUrl: String? = null,
 )
 
 val CatalogGame.canonicalUrl: String
-    get() = sourceUrl?.takeIf { it.isNotBlank() } ?: "https://f95zone.to/threads/$thread_id/"
+    get() = sourceUrl?.takeIf { it.isNotBlank() }
+        ?: SourceRegistry.threadUrl(source, sourceId ?: thread_id.takeIf { it > 0 }?.toString())
+        ?: if (source == SOURCE_F95ZONE && thread_id > 0) "https://f95zone.to/threads/$thread_id/" else ""
 
 val CatalogGame.f95ThreadIdOrNull: Int?
-    get() = thread_id.takeIf { source == CatalogSource.F95Zone && it > 0 }
+    get() = thread_id.takeIf { source == SOURCE_F95ZONE && it > 0 }
 
 /** Accepts JSON strings, numbers, or null and returns a String?.
  *  Works around F95's API occasionally returning numeric versions like 0.04. */
@@ -153,6 +155,33 @@ object LooseStringSerializer : kotlinx.serialization.KSerializer<String?> {
 @Serializable
 data class CatalogLabels(
     val generated_at: String = "",
+    val tags: Map<String, String> = emptyMap(),
+    val prefixes: Map<String, String> = emptyMap(),
+)
+
+/** v2 namespaced labels (labels-v2.json): tag/prefix id->name maps scoped per source,
+ *  so numeric ids from different sources can never collide. */
+@Serializable
+data class CatalogLabelsV2(
+    val schemaVersion: Int = 2,
+    val generated_at: String = "",
+    val sources: Map<String, SourceLabels> = emptyMap(),
+) {
+    fun forSource(source: String): SourceLabels? = sources[source]
+
+    /** Resolve a tag id to its display name within a specific source. */
+    fun tagName(source: String, id: String): String? = sources[source]?.tags?.get(id)
+
+    /** Resolve a prefix id to its display name within a specific source. */
+    fun prefixName(source: String, id: String): String? = sources[source]?.prefixes?.get(id)
+
+    /** All tag + prefix display names across every source (for autocomplete). */
+    val allLabelNames: List<String>
+        get() = sources.values.flatMap { it.tags.values + it.prefixes.values }
+}
+
+@Serializable
+data class SourceLabels(
     val tags: Map<String, String> = emptyMap(),
     val prefixes: Map<String, String> = emptyMap(),
 )

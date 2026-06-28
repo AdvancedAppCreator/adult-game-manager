@@ -264,7 +264,7 @@ object MatchResearchCollector {
             sourceIndexGeneratedAt = index?.generatedAt,
             sources = index?.catalogs.orEmpty().map {
                 MatchResearchCatalogSourceMeta(
-                    source = it.source.name,
+                    source = it.id,
                     generatedAt = it.generatedAt,
                     count = it.count,
                 )
@@ -301,7 +301,7 @@ object MatchResearchCollector {
                 MatchResearchMatcherResult(
                     threadId = it.game.thread_id,
                     title = it.game.title,
-                    source = it.game.source.name,
+                    source = it.game.source,
                     sourceId = it.game.sourceId,
                     via = it.via,
                     version = it.game.version,
