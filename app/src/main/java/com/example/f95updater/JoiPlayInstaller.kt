@@ -3,7 +3,6 @@ package com.example.f95updater
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -22,6 +21,13 @@ import java.io.File
  * There's no documented JoiPlay action that accepts a raw zip/rar/7z and extracts
  * it. The user must unzip with their file manager first, then point at a
  * recognizable launch file inside the game folder.
+ *
+ * IMPORTANT: JoiPlay resolves a content:// URI through a MediaStore `_data` lookup
+ * (utilities.d.g -> f()), which returns null for our app's FileProvider (not a
+ * MediaStore-backed provider, no `_data` column). That null becomes "path not found".
+ * For a file:// URI it returns uri.getPath() directly. So we MUST hand JoiPlay the
+ * raw file:// path; JoiPlay holds MANAGE_EXTERNAL_STORAGE and reads shared storage
+ * itself. MainActivity relaxes StrictMode's file-URI-exposure check accordingly.
  */
 object JoiPlayInstaller {
 
@@ -49,20 +55,11 @@ object JoiPlayInstaller {
             AppLog.w("JoiPlayInstall", "Archive extension .$ext — JoiPlay doesn't extract archives")
             return@withContext null
         }
+        // JoiPlay needs a real filesystem path. A FileProvider content:// URI breaks its
+        // MediaStore-based resolver (-> "path not found"), so hand it the raw file:// URI.
+        // It has MANAGE_EXTERNAL_STORAGE and reads shared storage on its own.
         val safeUri = when (uri.scheme) {
-            "file" -> {
-                val path = uri.path ?: return@withContext null
-                runCatching {
-                    FileProvider.getUriForFile(
-                        context,
-                        "${context.packageName}.fileprovider",
-                        File(path),
-                    )
-                }.getOrElse {
-                    AppLog.w("JoiPlayInstall", "Could not create content URI for $uri", it)
-                    return@withContext null
-                }
-            }
+            "file" -> uri
             "content" -> uri
             else -> uri
         }

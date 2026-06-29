@@ -69,6 +69,11 @@ import java.util.Date
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // JoiPlay resolves only raw file:// paths (its MediaStore-based content:// resolver
+        // returns null for our FileProvider). Allow passing file:// URIs to it without crashing.
+        android.os.StrictMode.setVmPolicy(
+            android.os.StrictMode.VmPolicy.Builder().build(),
+        )
         AppLog.init(applicationContext)
         AppLog.i("App", "onCreate v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
         CrashReporter.install(applicationContext)
