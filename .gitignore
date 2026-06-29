@@ -3,6 +3,9 @@ build/
 app/build/
 app/.cxx/
 
+# Private AGM session/infra material. Never commit this.
+.agm-private/
+
 # Local release signing material. Never commit these.
 app/keystore.properties
 app/*.keystore
