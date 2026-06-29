@@ -8,6 +8,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -22,6 +23,8 @@ import java.util.zip.GZIPInputStream
 private val Context.catalogMetaStore by preferencesDataStore("catalog_meta")
 private val ETAG_KEY     = stringPreferencesKey("catalog_etag")
 private val LASTMOD_KEY  = stringPreferencesKey("catalog_lastmod")
+private val LABELS_ETAG_KEY    = stringPreferencesKey("labels_etag")
+private val LABELS_LASTMOD_KEY = stringPreferencesKey("labels_lastmod")
 private val LASTSYNC_KEY = longPreferencesKey("catalog_last_sync_ms")
 private val SIZE_KEY     = longPreferencesKey("catalog_size_bytes")
 private val COUNT_KEY    = longPreferencesKey("catalog_count")
@@ -441,7 +444,6 @@ class CatalogRepository(private val context: Context) {
                             it[SIZE_KEY]     = bytes.size.toLong()
                             it[COUNT_KEY]    = count.toLong()
                         }
-                        runCatching { syncLabels() }
                         mergeSourceSync(CatalogSyncResult.Updated(count, bytes.size.toLong()))
                     }
                     else -> mergeSourceSync(CatalogSyncResult.Error("HTTP ${resp.code}"))
@@ -451,6 +453,7 @@ class CatalogRepository(private val context: Context) {
     }
 
     private fun mergeSourceSync(legacyResult: CatalogSyncResult): CatalogSyncResult {
+        syncLabels()
         val sourceResult = syncSourceCatalogsBlocking()
         if (sourceResult is CatalogSyncResult.Error) {
             AppLog.e("Catalog", "Source catalog sync failed: ${sourceResult.message}")
@@ -513,13 +516,30 @@ class CatalogRepository(private val context: Context) {
     }
 
     private fun syncLabels() {
-        val req = Request.Builder().url(labelsUrl).build()
-        client.newCall(req).execute().use { resp ->
-            if (resp.isSuccessful) {
-                resp.body?.bytes()?.let { labelsFile.writeBytes(it) }
-            }
+        val haveLocal = labelsFile.exists() && labelsFile.length() > 0L
+        val prefs = runBlocking { context.catalogMetaStore.data.first() }
+        val builder = Request.Builder().url(labelsUrl)
+        if (haveLocal) {
+            prefs[LABELS_ETAG_KEY]?.let { builder.header("If-None-Match", it) }
+            prefs[LABELS_LASTMOD_KEY]?.let { builder.header("If-Modified-Since", it) }
         }
-        cachedLabels = null
+        runCatching {
+            client.newCall(builder.build()).execute().use { resp ->
+                if (resp.code == 200) {
+                    resp.body?.bytes()?.let { labelsFile.writeBytes(it) }
+                    val etag = resp.header("ETag")
+                    val lm = resp.header("Last-Modified")
+                    runBlocking {
+                        context.catalogMetaStore.edit {
+                            if (!etag.isNullOrBlank()) it[LABELS_ETAG_KEY] = etag
+                            if (!lm.isNullOrBlank()) it[LABELS_LASTMOD_KEY] = lm
+                        }
+                    }
+                    cachedLabels = null
+                }
+                // 304: keep existing labels.json. Other codes: leave cache untouched.
+            }
+        }.onFailure { AppLog.e("Catalog", "label sync failed", it) }
     }
 
     @Volatile private var cachedIndex:  Map<String, List<CatalogGame>>? = null
