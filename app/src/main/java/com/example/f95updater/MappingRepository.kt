@@ -43,6 +43,56 @@ data class ImportSummary(
     val joiplayOverrides: Int,
 )
 
+/** Outcome of reconciling persisted mappings against the live scan. */
+data class PruneStaleResult(val removed: Int, val retainedWithData: Int)
+
+/** Plan produced by [computeStalePrune]: which mapping keys to delete plus a
+ *  count of stale-but-preserved mappings (kept because they carry user data). */
+internal data class StalePrunePlan(
+    val removeKeys: Set<String>,
+    val retainedWithData: Int,
+)
+
+/** A mapping carries user-authored data worth preserving even when its game is
+ *  (temporarily) absent from the scan. Such mappings are never auto-deleted; the
+ *  install badge is cleared for them via the live-scan derivation instead. */
+internal fun AppMapping.hasUserData(): Boolean =
+    personalRating != null ||
+        personalNotes.isNotBlank() ||
+        userStatus != UserGameStatus.None ||
+        manualCorrectionNote.isNotBlank() ||
+        manualInstalledVersion.isNotBlank() ||
+        manualInstalledDate > 0L ||
+        matchSource?.startsWith("manual") == true
+
+/** Pure reconciliation decision. A mapping is stale (deletable) only when its
+ *  game is absent from [installedPackageNames] AND the source that owns it
+ *  actually produced results this scan ([androidScanned]/[joiplayScanned]) —
+ *  otherwise a denied permission or an unloaded JoiPlay backup would be misread
+ *  as "everything uninstalled" and wipe good mappings. Mappings with user data
+ *  are retained, not removed. */
+internal fun computeStalePrune(
+    mappings: Map<String, AppMapping>,
+    installedPackageNames: Set<String>,
+    androidScanned: Boolean,
+    joiplayScanned: Boolean,
+): StalePrunePlan {
+    val remove = HashSet<String>()
+    var retained = 0
+    for ((pkg, mapping) in mappings) {
+        if (pkg in installedPackageNames) continue
+        val isJoiplay = pkg.startsWith("joiplay:")
+        if (isJoiplay && !joiplayScanned) continue
+        if (!isJoiplay && !androidScanned) continue
+        if (mapping.hasUserData()) {
+            retained++
+            continue
+        }
+        remove += pkg
+    }
+    return StalePrunePlan(remove, retained)
+}
+
 class MappingRepository(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val mapSer = MapSerializer(String.serializer(), AppMapping.serializer())
@@ -80,6 +130,23 @@ class MappingRepository(private val context: Context) {
         val current = get().toMutableMap()
         current.remove(packageName)
         save(current)
+    }
+
+    /** Reconcile persisted mappings against the live scan: delete mappings whose
+     *  game is no longer installed and that hold no user data. Non-destructive
+     *  for mappings carrying ratings/notes/status/manual choices, and guarded so
+     *  a source that produced no results this scan can't trigger deletions. */
+    suspend fun pruneStale(
+        installedPackageNames: Set<String>,
+        androidScanned: Boolean,
+        joiplayScanned: Boolean,
+    ): PruneStaleResult {
+        val current = get()
+        val plan = computeStalePrune(current, installedPackageNames, androidScanned, joiplayScanned)
+        if (plan.removeKeys.isNotEmpty()) {
+            save(current.filterKeys { it !in plan.removeKeys })
+        }
+        return PruneStaleResult(plan.removeKeys.size, plan.retainedWithData)
     }
 
     suspend fun importAll(incoming: Map<String, AppMapping>, replace: Boolean) {

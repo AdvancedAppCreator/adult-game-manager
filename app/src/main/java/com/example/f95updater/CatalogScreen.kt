@@ -58,6 +58,7 @@ fun CatalogScreen(
     catalog: CatalogRepository,
     labels: CatalogLabelsV2?,
     mappings: Map<String, AppMapping>,
+    installedPackageNames: Set<String>,
     screenshotQuery: String? = null,
     onOpenThread: (String) -> Unit,
 ) {
@@ -155,12 +156,14 @@ fun CatalogScreen(
     }
 
     // Cache source-aware catalog identifiers linked to installed apps for quick filtering.
-    val installedCatalogKeys: Set<CatalogInstallKey> = remember(mappings) {
-        mappings.values.flatMap { catalogInstallKeys(it) }.toSet()
+    // Derived from the LIVE scan: only mappings whose local game is currently
+    // installed ([installedPackageNames]) mark a catalog entry as installed. Stale
+    // mappings (uninstalled apps, deleted JoiPlay games) no longer light the badge.
+    val installedIdentities = remember(mappings, installedPackageNames) {
+        installedCatalogIdentities(mappings, installedPackageNames)
     }
-    val installedCatalogUrls: Set<String> = remember(mappings) {
-        mappings.values.flatMap { catalogInstallUrls(it) }.toSet()
-    }
+    val installedCatalogKeys: Set<CatalogInstallKey> = installedIdentities.keys
+    val installedCatalogUrls: Set<String> = installedIdentities.urls
     fun isInstalled(entry: SourceCatalogEntry): Boolean {
         return catalogInstallKey(entry) in installedCatalogKeys ||
             (entry.canonicalUrl.isNotBlank() && entry.canonicalUrl in installedCatalogUrls)
@@ -1118,6 +1121,30 @@ internal data class CatalogInstallKey(
     val source: String,
     val sourceId: String,
 )
+
+internal data class InstalledCatalogIdentities(
+    val keys: Set<CatalogInstallKey>,
+    val urls: Set<String>,
+)
+
+/** Catalog identities considered "installed", derived from the live scan: a
+ *  mapping contributes its keys/urls only when its local game
+ *  ([installedPackageNames]) is currently installed. This keeps the catalog's
+ *  "Installed" badge/filter in sync with the actual games list rather than with
+ *  every mapping ever persisted. */
+internal fun installedCatalogIdentities(
+    mappings: Map<String, AppMapping>,
+    installedPackageNames: Set<String>,
+): InstalledCatalogIdentities {
+    val keys = HashSet<CatalogInstallKey>()
+    val urls = HashSet<String>()
+    for ((pkg, mapping) in mappings) {
+        if (pkg !in installedPackageNames) continue
+        keys += catalogInstallKeys(mapping)
+        urls += catalogInstallUrls(mapping)
+    }
+    return InstalledCatalogIdentities(keys, urls)
+}
 
 internal fun catalogInstallKey(entry: SourceCatalogEntry): CatalogInstallKey =
     CatalogInstallKey(entry.source, entry.sourceId)

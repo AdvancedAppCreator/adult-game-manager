@@ -665,6 +665,10 @@ fun AppRoot() {
         installedShellReady = true
     }
     val mappings by repo.mappings.collectAsState(initial = emptyMap())
+    // Live installed package identities, lifted from InstalledScreen's scan so the
+    // Catalog tab's "Installed" badge/filter reflects the current games list even
+    // while the Installed tab is not composed.
+    var installedPackageNames by remember { mutableStateOf<Set<String>>(emptySet()) }
     val appConfig by AppConfigStore.observe(context.applicationContext).collectAsState()
     var screenshotCapturing by remember { mutableStateOf(false) }
     var rootSnackbarMsg by remember { mutableStateOf<String?>(null) }
@@ -770,6 +774,7 @@ fun AppRoot() {
                             onLabelsChange = { catalogLabels = it },
                             onScreenshotTabChange = { tab = it },
                             onScreenshotCatalogQuery = { screenshotCatalogQuery = it },
+                            onInstalledPackagesChange = { installedPackageNames = it },
                         )
                     }
                 }
@@ -777,6 +782,7 @@ fun AppRoot() {
                     catalog = catalog,
                     labels = catalogLabels,
                     mappings = mappings,
+                    installedPackageNames = installedPackageNames,
                     screenshotQuery = screenshotCatalogQuery,
                     onOpenThread = { url ->
                         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -820,6 +826,7 @@ fun InstalledScreen(
     onLabelsChange: (CatalogLabelsV2?) -> Unit,
     onScreenshotTabChange: (Tab) -> Unit = {},
     onScreenshotCatalogQuery: (String?) -> Unit = {},
+    onInstalledPackagesChange: (Set<String>) -> Unit = {},
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -887,6 +894,26 @@ fun InstalledScreen(
     var checking by remember { mutableStateOf(false) }
     var checkProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var snackbarMsg by remember { mutableStateOf<String?>(null) }
+    // Reconcile persisted mappings against each live scan result: publish the
+    // installed package set for the Catalog "Installed" badge, and delete stale
+    // mappings whose game is gone (preserving any that carry user data). Guarded
+    // against empty/partial scans so a denied permission can't wipe good data.
+    LaunchedEffect(apps) {
+        if (apps.isEmpty()) return@LaunchedEffect
+        val installedPkgs = apps.mapTo(HashSet()) { it.packageName }
+        val androidScanned = apps.any { it.source == AppSource.Android }
+        val joiplayScanned = apps.any { it.source == AppSource.JoiPlay }
+        onInstalledPackagesChange(installedPkgs)
+        val result = repo.pruneStale(installedPkgs, androidScanned, joiplayScanned)
+        if (result.removed > 0) {
+            AppLog.i(
+                "Mapping",
+                "Reconcile removed ${result.removed} stale mapping(s); retained ${result.retainedWithData} with user data",
+            )
+            snackbarMsg = "Removed ${result.removed} stale mapping" +
+                if (result.removed == 1) "" else "s"
+        }
+    }
     var autoBackupList by remember { mutableStateOf<List<AutoBackupManager.BackupEntry>>(emptyList()) }
     var autoBackupDialogOpen by remember { mutableStateOf(false) }
     var autoBackupConfirmRestore by remember { mutableStateOf<AutoBackupManager.BackupEntry?>(null) }
