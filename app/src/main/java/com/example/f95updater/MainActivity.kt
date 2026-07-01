@@ -7370,13 +7370,13 @@ private fun JoiPlayUnusedFolderReportDialog(
                 Text(
                     "Selected backup has ${report.backupGameCount} games. " +
                         "Compared ${report.backupGamesUnderRoot} backup games under the root across " +
-                        "${report.scannedParentPaths.size} adjacent-folder locations.",
+                        "${report.scannedParentPaths.size} scanned folders.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 if (report.inaccessibleParentPaths.isNotEmpty()) {
                     Text(
-                        "${report.inaccessibleParentPaths.size} parent folders could not be read.",
+                        "${report.inaccessibleParentPaths.size} folders could not be read.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )

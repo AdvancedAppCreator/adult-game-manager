@@ -63,6 +63,10 @@ data class RenPySaveBackup(
 
 object RenPySaveEditor {
     private const val MAX_BACKUPS = 3
+    /** Bounds for nested traversal so inspecting very large (multi-MB) saves stays responsive. */
+    private const val MAX_NESTED_DEPTH = 24
+    private const val MAX_NESTED_VARIABLES = 4000
+    private const val MAX_NESTED_NODES = 200_000
 
     suspend fun inspect(slot: RenPySaveSlot): RenPyEditInspection = withContext(Dispatchers.IO) {
         runCatching {
@@ -213,21 +217,143 @@ object RenPySaveEditor {
     }
 
     private fun editableVariables(log: ByteArray): List<RenPyEditableVariable> {
-        val byVm = runCatching {
+        val byVm = ArrayList<RenPyEditableVariable>()
+        val nested = ArrayList<RenPyEditableVariable>()
+        runCatching {
             val parsed = PickleVm.parse(log)
             val roots = parsed.finalValue.asTupleItems().firstOrNull() as? PValue.DictValue
-                ?: return@runCatching emptyList()
-            roots.entries.mapNotNull { (keyValue, value) ->
-                val key = (keyValue as? PValue.StringValue)?.value ?: return@mapNotNull null
-                if (!key.startsWith("store.")) return@mapNotNull null
-                value.toEditableVariable(key, parsed.referenceCounts)
+                ?: return@runCatching
+            roots.entries.forEach { (keyValue, value) ->
+                val key = (keyValue as? PValue.StringValue)?.value ?: return@forEach
+                if (!key.startsWith("store.")) return@forEach
+                value.toEditableVariable(key, parsed.referenceCounts)?.let { byVm += it }
             }
-        }.getOrDefault(emptyList())
+            collectNestedScalars(roots, parsed.referenceCounts, nested)
+        }
         val direct = scanDirectStoreScalars(log)
-        return (byVm + direct)
+        return (byVm + direct + nested)
             .distinctBy { it.key }
             .sortedBy { it.key.lowercase() }
     }
+
+    /**
+     * Walks the store roots into nested containers and custom-class object state to surface
+     * scalars that are not top-level store.* variables (e.g. plugin character stats that the
+     * game mirrors into derived store variables). Each scalar is keyed by its path so it can be
+     * edited and read back deterministically.
+     */
+    private fun collectNestedScalars(
+        roots: PValue.DictValue,
+        referenceCounts: Map<Int, Int>,
+        out: MutableList<RenPyEditableVariable>,
+    ) {
+        val visited = HashSet<Int>()
+        val budget = intArrayOf(MAX_NESTED_NODES)
+        roots.entries.forEach { (keyValue, value) ->
+            val key = (keyValue as? PValue.StringValue)?.value ?: return@forEach
+            if (!key.startsWith("store.")) return@forEach
+            if (value is PValue.DictValue || value is PValue.ListValue ||
+                value is PValue.TupleValue || value is PValue.ObjectValue ||
+                value is PValue.InstanceValue
+            ) {
+                walkNested(value, key, referenceCounts, visited, out, budget, 0)
+            }
+        }
+    }
+
+    private fun walkNested(
+        node: PValue,
+        path: String,
+        referenceCounts: Map<Int, Int>,
+        visited: MutableSet<Int>,
+        out: MutableList<RenPyEditableVariable>,
+        budget: IntArray,
+        depth: Int,
+    ) {
+        if (depth > MAX_NESTED_DEPTH || out.size >= MAX_NESTED_VARIABLES || budget[0] <= 0) return
+        if (!visited.add(node.id)) return
+        budget[0]--
+        when (node) {
+            is PValue.DictValue -> node.entries.forEach { (k, v) ->
+                val seg = pathSegment(k) ?: return@forEach
+                emitNested(v, "$path.$seg", referenceCounts, visited, out, budget, depth)
+            }
+            is PValue.ListValue -> node.items.forEachIndexed { i, v ->
+                emitNested(v, "$path[${indexLabel(i, v)}]", referenceCounts, visited, out, budget, depth)
+            }
+            is PValue.TupleValue -> node.items.forEachIndexed { i, v ->
+                emitNested(v, "$path($i)", referenceCounts, visited, out, budget, depth)
+            }
+            is PValue.ObjectValue -> node.state?.let { emitNested(it, path, referenceCounts, visited, out, budget, depth) }
+            is PValue.InstanceValue -> {
+                node.dictEntries.forEach { (k, v) ->
+                    val seg = pathSegment(k) ?: return@forEach
+                    emitNested(v, "$path.$seg", referenceCounts, visited, out, budget, depth)
+                }
+                node.listItems.forEachIndexed { i, v ->
+                    emitNested(v, "$path[${indexLabel(i, v)}]", referenceCounts, visited, out, budget, depth)
+                }
+                node.state?.let { emitNested(it, path, referenceCounts, visited, out, budget, depth) }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun emitNested(
+        value: PValue,
+        path: String,
+        referenceCounts: Map<Int, Int>,
+        visited: MutableSet<Int>,
+        out: MutableList<RenPyEditableVariable>,
+        budget: IntArray,
+        depth: Int,
+    ) {
+        if (out.size >= MAX_NESTED_VARIABLES) return
+        when (value) {
+            is PValue.IntValue, is PValue.FloatValue, is PValue.BoolValue, is PValue.StringValue ->
+                value.toEditableVariable(path, referenceCounts)?.let { out += it }
+            is PValue.DictValue, is PValue.ListValue, is PValue.TupleValue,
+            is PValue.ObjectValue, is PValue.InstanceValue ->
+                walkNested(value, path, referenceCounts, visited, out, budget, depth + 1)
+            else -> Unit
+        }
+    }
+
+    /** Renders a dict key as a path segment; only scalar keys produce a readable path. */
+    private fun pathSegment(key: PValue): String? = when (key) {
+        is PValue.StringValue -> key.value
+        is PValue.IntValue -> key.value.toString()
+        is PValue.BoolValue -> key.value.toString()
+        else -> null
+    }
+
+    /** Labels a list index, appending a name hint when the element is a named object/dict
+     *  (e.g. a character with a "name"/"charName" field) so it is searchable by name. */
+    private fun indexLabel(index: Int, item: PValue): String {
+        val name = displayNameHint(item)?.let { ":$it" } ?: ""
+        return "$index$name"
+    }
+
+    private fun displayNameHint(item: PValue): String? {
+        val entries: Map<PValue, PValue> = when (item) {
+            is PValue.DictValue -> item.entries
+            is PValue.InstanceValue -> when {
+                item.dictEntries.isNotEmpty() -> item.dictEntries
+                item.state is PValue.DictValue -> (item.state as PValue.DictValue).entries
+                item.state is PValue.InstanceValue -> (item.state as PValue.InstanceValue).dictEntries
+                else -> return null
+            }
+            is PValue.ObjectValue -> (item.state as? PValue.DictValue)?.entries ?: return null
+            else -> return null
+        }
+        val nameEntry = entries.entries.firstOrNull { (k, v) ->
+            v is PValue.StringValue &&
+                (k as? PValue.StringValue)?.value?.lowercase()?.let { it == "name" || it.endsWith("name") } == true
+        } ?: return null
+        val name = (nameEntry.value as PValue.StringValue).value.trim()
+        return name.takeIf { it.isNotEmpty() && it.length <= 40 }
+    }
+
 
     private fun scanDirectStoreScalars(log: ByteArray): List<RenPyEditableVariable> {
         val found = linkedMapOf<String, RenPyEditableVariable>()
@@ -667,6 +793,25 @@ private sealed class PValue(open val id: Int, open val start: Int, open val end:
     data class ListValue(override val id: Int, val items: List<PValue>, override val start: Int, override val end: Int) : PValue(id, start, end)
     data class TupleValue(override val id: Int, val items: List<PValue>, override val start: Int, override val end: Int) : PValue(id, start, end)
 
+    /** A pickled custom-class instance whose __dict__/__setstate__ payload (from a BUILD opcode)
+     *  is retained as [state] so nested scalars (e.g. plugin character stats) stay reachable. */
+    data class ObjectValue(override val id: Int, val state: PValue?, override val start: Int, override val end: Int) : PValue(id, start, end)
+
+    /**
+     * A pickled object built via NEWOBJ/REDUCE. Ren'Py's RevertableDict/RevertableList and similar
+     * dict/list subclasses are populated directly with SETITEMS/APPENDS and may also carry a BUILD
+     * [state]. Backing collections are mutable so memoized references observe later mutations,
+     * keeping nested scalars (plugin character stats, inventories, etc.) reachable.
+     */
+    class InstanceValue(
+        override val id: Int,
+        override val start: Int,
+        override val end: Int,
+        val dictEntries: LinkedHashMap<PValue, PValue> = LinkedHashMap(),
+        val listItems: MutableList<PValue> = mutableListOf(),
+        var state: PValue? = null,
+    ) : PValue(id, start, end)
+
     fun asTupleItems(): List<PValue> = (this as? TupleValue)?.items.orEmpty()
 }
 
@@ -777,8 +922,11 @@ private object PickleVm {
                 's'.code -> {
                     val value = stack.removeLast() as PValue
                     val key = stack.removeLast() as PValue
-                    val d = stack.last() as? PValue.DictValue ?: throw IllegalArgumentException("SETITEM without dict")
-                    d.entries[key] = value
+                    when (val d = stack.last()) {
+                        is PValue.DictValue -> d.entries[key] = value
+                        is PValue.InstanceValue -> d.dictEntries[key] = value
+                        else -> throw IllegalArgumentException("SETITEM without dict")
+                    }
                 }
                 't'.code -> stack += tuple(popSinceMark(stack), start, offset)
                 0x85 -> stack += tuple(listOf(stack.removeLast() as PValue), start, offset)
@@ -796,13 +944,19 @@ private object PickleVm {
                 'l'.code -> stack += list(popSinceMark(stack), start, offset)
                 'e'.code -> {
                     val items = popSinceMark(stack)
-                    val l = stack.last() as? PValue.ListValue ?: throw IllegalArgumentException("APPENDS without list")
-                    stack[stack.lastIndex] = l.copy(items = l.items + items, end = offset)
+                    when (val l = stack.last()) {
+                        is PValue.ListValue -> stack[stack.lastIndex] = l.copy(items = l.items + items, end = offset)
+                        is PValue.InstanceValue -> l.listItems.addAll(items)
+                        else -> throw IllegalArgumentException("APPENDS without list")
+                    }
                 }
                 'a'.code -> {
                     val item = stack.removeLast() as PValue
-                    val l = stack.last() as? PValue.ListValue ?: throw IllegalArgumentException("APPEND without list")
-                    stack[stack.lastIndex] = l.copy(items = l.items + item, end = offset)
+                    when (val l = stack.last()) {
+                        is PValue.ListValue -> stack[stack.lastIndex] = l.copy(items = l.items + item, end = offset)
+                        is PValue.InstanceValue -> l.listItems.add(item)
+                        else -> throw IllegalArgumentException("APPEND without list")
+                    }
                 }
                 '0'.code -> stack.removeLast()
                 '1'.code -> popSinceMark(stack)
@@ -859,19 +1013,25 @@ private object PickleVm {
                 if (stack.size >= 2) {
                     stack.removeLast(); stack.removeLast()
                 }
-                stack += opaque(start, end)
+                stack += instance(start, end)
             }
             0x92 -> {
                 if (stack.size >= 3) {
                     stack.removeLast(); stack.removeLast(); stack.removeLast()
                 }
-                stack += opaque(start, end)
+                stack += instance(start, end)
             }
             'b'.code -> {
                 if (stack.size >= 2) {
-                    stack.removeLast()
-                    val obj = stack.removeLast() as? PValue ?: opaque(start, end)
-                    stack += opaque(obj.start, end)
+                    val state = stack.removeLast() as? PValue
+                    when (val target = stack.removeLast()) {
+                        is PValue.InstanceValue -> {
+                            target.state = state
+                            stack += target
+                        }
+                        is PValue -> stack += objectValue(state, target.start, end)
+                        else -> stack += objectValue(state, start, end)
+                    }
                 }
             }
             'Q'.code -> {
@@ -891,10 +1051,15 @@ private object PickleVm {
 
     private fun setItems(stack: MutableList<Any>) {
         val items = popSinceMark(stack)
-        val d = stack.last() as? PValue.DictValue ?: throw IllegalArgumentException("SETITEMS without dict")
+        val target = stack.last()
+        val map = when (target) {
+            is PValue.DictValue -> target.entries
+            is PValue.InstanceValue -> target.dictEntries
+            else -> throw IllegalArgumentException("SETITEMS without dict")
+        }
         var i = 0
         while (i + 1 < items.size) {
-            d.entries[items[i]] = items[i + 1]
+            map[items[i]] = items[i + 1]
             i += 2
         }
     }
@@ -918,4 +1083,6 @@ private object PickleVm {
     private fun dict(entries: LinkedHashMap<PValue, PValue>, start: Int, end: Int) = PValue.DictValue(nextId++, entries, start, end)
     private fun list(items: List<PValue>, start: Int, end: Int) = PValue.ListValue(nextId++, items, start, end)
     private fun tuple(items: List<PValue>, start: Int, end: Int) = PValue.TupleValue(nextId++, items, start, end)
+    private fun objectValue(state: PValue?, start: Int, end: Int) = PValue.ObjectValue(nextId++, state, start, end)
+    private fun instance(start: Int, end: Int) = PValue.InstanceValue(nextId++, start, end)
 }

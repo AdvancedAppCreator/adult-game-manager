@@ -190,6 +190,38 @@ class RenPySaveScannerTest {
     }
 
     @Test
+    fun editorInspectsAndPatchesNestedObjectStateScalars() = runBlocking {
+        val save = File.createTempFile("renpy-nested-", ".save")
+        save.deleteOnExit()
+        writeSaveZip(save, renPyNestedObjectPickle(current = 23, max = 45))
+        val slot = RenPySaveSlot(
+            fileName = save.name,
+            filePath = save.absolutePath,
+            saveName = "Slot",
+            renpyVersion = "Ren'Py 8.3.0",
+            modifiedAt = save.lastModified(),
+            sizeBytes = save.length(),
+            hasScreenshot = false,
+            entries = listOf("log"),
+        )
+        val nestedKey = "store.mountCharacter.chars.nina.charStats.relationship.current"
+
+        val before = RenPySaveEditor.inspect(slot)
+        // Top-level scalar still surfaces (regression guard).
+        assertEquals("99", before.variables.first { it.key == "store.money" }.displayValue)
+        // Nested plugin-object scalar is now reachable by path.
+        assertEquals("23", before.variables.first { it.key == nestedKey }.displayValue)
+
+        val result = RenPySaveEditor.edit(slot, nestedKey, "45")
+        assertTrue(result.message, result.ok)
+
+        val after = RenPySaveEditor.inspect(slot)
+        assertEquals("45", after.variables.first { it.key == nestedKey }.displayValue)
+        // Sibling value untouched.
+        assertEquals("45", after.variables.first { it.key == "store.mountCharacter.chars.nina.charStats.relationship.max" }.displayValue)
+    }
+
+    @Test
     fun editorSignsRenPySaveWhenSecurityKeysExist() = runBlocking {
         val dir = createTempDir(prefix = "renpy-sign-")
         val save = File(dir, "slot1.save")
@@ -652,6 +684,54 @@ class RenPySaveScannerTest {
             out.write('.'.code)
             out.toByteArray()
         }
+
+    private fun renPyNestedObjectPickle(current: Int, max: Int): ByteArray =
+        ByteArrayOutputStream().use { out ->
+            out.write(byteArrayOf(0x80.toByte(), 0x02))
+            out.write('}'.code)                       // roots dict
+            out.write('('.code)                       // MARK (roots items)
+            out.writeBinUnicode("store.money")        // a top-level scalar (regression guard)
+            out.write('K'.code); out.write(99)
+            out.writeBinUnicode("store.mountCharacter")
+            // value: a custom-class instance with __dict__ state attached via BUILD
+            out.writeGlobal("renpy.python", "RevertableObject")
+            out.write(')'.code)                       // empty args tuple
+            out.write(0x81)                           // NEWOBJ -> opaque instance
+            out.write('}'.code)                       // state dict
+            out.write('('.code)                       // MARK (state items)
+            out.writeBinUnicode("chars")
+            out.write('}'.code)                       // chars dict
+            out.write('('.code)                       // MARK
+            out.writeBinUnicode("nina")
+            out.write('}'.code)                       // nina dict
+            out.write('('.code)                       // MARK
+            out.writeBinUnicode("charStats")
+            out.write('}'.code)                       // charStats dict
+            out.write('('.code)                       // MARK
+            out.writeBinUnicode("relationship")
+            out.write('}'.code)                       // relationship dict
+            out.write('('.code)                       // MARK
+            out.writeBinUnicode("current")
+            out.write('K'.code); out.write(current)
+            out.writeBinUnicode("max")
+            out.write('K'.code); out.write(max)
+            out.write('u'.code)                       // SETITEMS relationship
+            out.write('u'.code)                       // SETITEMS charStats
+            out.write('u'.code)                       // SETITEMS nina
+            out.write('u'.code)                       // SETITEMS chars
+            out.write('u'.code)                       // SETITEMS state dict
+            out.write('b'.code)                       // BUILD -> ObjectValue(state)
+            out.write('u'.code)                       // SETITEMS roots
+            out.write(']'.code)
+            out.write(0x86)
+            out.write('.'.code)
+            out.toByteArray()
+        }
+
+    private fun ByteArrayOutputStream.writeGlobal(module: String, name: String) {
+        write('c'.code)
+        write("$module\n$name\n".toByteArray(Charsets.UTF_8))
+    }
 
     private fun renPyLongPickle(key: String, value: Long): ByteArray =
         ByteArrayOutputStream().use { out ->

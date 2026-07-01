@@ -26,7 +26,7 @@ data class JoiPlayUnusedFolderReport(
         appendLine("Root: $rootPath")
         appendLine("Backup games: $backupGameCount")
         appendLine("Backup games under root: $backupGamesUnderRoot")
-        appendLine("Scanned parent folders: ${scannedParentPaths.size}")
+        appendLine("Scanned folders: ${scannedParentPaths.size}")
         appendLine("In JoiPlay: ${inUseFolders.size}")
         appendLine("Probably unused: ${probablyUnusedFolders.size}")
         if (missingReferencedFolders.isNotEmpty()) {
@@ -45,7 +45,7 @@ data class JoiPlayUnusedFolderReport(
             if (entry.title.isNullOrBlank()) entry.path else "${entry.path}  --  ${entry.title}"
         }
         if (inaccessibleParentPaths.isNotEmpty()) {
-            appendLine("Inaccessible parent folders")
+            appendLine("Inaccessible folders")
             inaccessibleParentPaths.forEach { appendLine("- $it") }
             appendLine()
         }
@@ -68,6 +68,10 @@ data class JoiPlayUnusedFolderReport(
 
 object JoiPlayUnusedFolderReporter {
     private val engineSubdirs = setOf("www", "game", "app", "src", "resources")
+
+    /** Guards against pathological trees. */
+    private const val MAX_DEPTH = 25
+    private const val MAX_NODES = 50_000
 
     data class Progress(
         val stage: String,
@@ -96,109 +100,100 @@ object JoiPlayUnusedFolderReporter {
             )
         }
 
-        val parentChildCounts = parsedGames
-            .flatMap { candidateFolders(it.gamePath, rootPath) }
-            .groupBy { it.parentPath }
-            .mapValues { (_, candidates) -> candidates.map { key(it.path) }.distinct().size }
+        // Titles keyed by the (lowercased) game folder path.
+        val titlesByGameKey: Map<String, String?> = parsedGames
+            .groupBy { key(it.gamePath) }
+            .mapValues { (_, games) -> games.mapNotNull { it.title }.distinct().joinToString(", ").ifBlank { null } }
+        val gameKeys: Set<String> = titlesByGameKey.keys
 
-        val backupFolders = parsedGames.mapNotNull { game ->
-            val candidates = candidateFolders(game.gamePath, rootPath)
-            val chosen = candidates.maxWithOrNull(
-                compareBy<BackupFolderCandidate> { parentChildCounts[it.parentPath] ?: 0 }
-                    .thenByDescending { -pathDepth(it.parentPath, rootPath) }
-            ) ?: return@mapNotNull null
-            BackupFolder(
-                title = game.title,
-                path = chosen.path,
-                parentPath = chosen.parentPath,
-                gamePath = game.gamePath,
-            )
-        }
-
-        val reportFolders = backupFolders
-            .groupBy { key(it.path) }
-            .values
-            .map { folders ->
-                val first = folders.first()
-                BackupFolder(
-                    title = folders.mapNotNull { it.title }.distinct().joinToString(", ").ifBlank { null },
-                    path = first.path,
-                    parentPath = first.parentPath,
-                    gamePath = folders.joinToString(" | ") { it.gamePath },
-                )
-            }
-
-        val parents = reportFolders.map { it.parentPath }.distinct().sortedBy { it.lowercase() }
-        val reportByPathKey = reportFolders.associateBy { key(it.path) }
         val inUse = mutableListOf<JoiPlayUnusedFolderEntry>()
         val unused = mutableListOf<JoiPlayUnusedFolderEntry>()
-        val seenChildKeys = mutableSetOf<String>()
+        val scannedContainers = mutableListOf<String>()
         val inaccessible = mutableListOf<String>()
+        val seenGameKeys = mutableSetOf<String>()
+        var nodeBudget = MAX_NODES
+
+        // True when a game folder is at, or anywhere below, dirKey.
+        fun subtreeHasGame(dirKey: String): Boolean =
+            gameKeys.any { it == dirKey || it.startsWith("$dirKey/") }
 
         AppLog.i(
             "JoiPlayUnused",
             "Scan start root='$rootPath' backupGames=${backupGames.size} underRoot=${parsedGames.size} " +
-                "reportFolders=${reportFolders.size} parents=${parents.size}"
+                "gameFolders=${gameKeys.size}"
         )
-        parents.take(50).forEach { AppLog.i("JoiPlayUnused", "parent='$it'") }
 
-        for ((idx, parentPath) in parents.withIndex()) {
+        suspend fun descend(dir: File, dirPath: String, depth: Int) {
+            scannedContainers.add(dirPath)
             onProgress(
                 Progress(
-                    stage = "Scanning adjacent folders",
-                    current = idx + 1,
-                    total = parents.size,
-                    detail = parentPath,
+                    stage = "Scanning folders",
+                    current = scannedContainers.size,
+                    total = scannedContainers.size,
+                    detail = dirPath,
                 )
             )
-            val parent = File(parentPath)
-            val children = runCatching { parent.listFiles() }.getOrNull()
+            val children = runCatching { dir.listFiles() }.getOrNull()
             if (children == null) {
-                inaccessible.add(parentPath)
-                AppLog.w("JoiPlayUnused", "parent inaccessible: '$parentPath'")
-                continue
+                inaccessible.add(dirPath)
+                AppLog.w("JoiPlayUnused", "inaccessible: '$dirPath'")
+                return
             }
             children
                 .asSequence()
                 .filter { it.isDirectory && !it.name.startsWith(".") }
                 .sortedBy { it.name.lowercase() }
-                .forEach { child ->
+                .forEach forEachChild@{ child ->
+                    if (nodeBudget <= 0) return@forEachChild
+                    nodeBudget--
                     val childPath = normalizeExisting(child).trimEnd('/')
                     val childKey = key(childPath)
-                    seenChildKeys.add(childKey)
-                    val matchingBackupFolder = reportByPathKey[childKey]
-                    val entry = JoiPlayUnusedFolderEntry(
-                        name = child.name,
-                        path = childPath,
-                        parentPath = parentPath,
-                        title = matchingBackupFolder?.title,
-                    )
-                    if (matchingBackupFolder != null) {
-                        inUse.add(entry)
-                        AppLog.i(
-                            "JoiPlayUnused",
-                            "IN path='${entry.path}' title='${entry.title ?: ""}' " +
-                                "matchedBackup=${matchingBackupFolder.gamePath}"
-                        )
-                    } else {
-                        unused.add(entry)
-                        AppLog.i("JoiPlayUnused", "OUT path='${entry.path}' parent='${entry.parentPath}'")
+                    val isGame = childKey in gameKeys
+                    val hasGame = isGame || subtreeHasGame(childKey)
+                    when {
+                        !hasGame -> {
+                            unused.add(
+                                JoiPlayUnusedFolderEntry(
+                                    name = child.name,
+                                    path = childPath,
+                                    parentPath = dirPath,
+                                    title = null,
+                                )
+                            )
+                            AppLog.i("JoiPlayUnused", "OUT path='$childPath' parent='$dirPath'")
+                        }
+                        isGame -> {
+                            seenGameKeys.add(childKey)
+                            val title = titlesByGameKey[childKey]
+                            inUse.add(
+                                JoiPlayUnusedFolderEntry(
+                                    name = child.name,
+                                    path = childPath,
+                                    parentPath = dirPath,
+                                    title = title,
+                                )
+                            )
+                            AppLog.i("JoiPlayUnused", "IN path='$childPath' title='${title ?: ""}'")
+                        }
+                        depth + 1 < MAX_DEPTH -> descend(child, childPath, depth + 1)
+                        else -> AppLog.w("JoiPlayUnused", "depth cap reached at '$childPath'")
                     }
                 }
         }
 
-        onProgress(Progress(stage = "Finalizing report", current = parents.size, total = parents.size))
-        val missing = reportFolders
-            .filter { backup ->
-                backup.parentPath !in inaccessible &&
-                    key(backup.path) !in seenChildKeys
-            }
-            .map {
+        descend(rootFolder, rootPath, depth = 0)
+
+        onProgress(Progress(stage = "Finalizing report", current = scannedContainers.size, total = scannedContainers.size))
+        val missing = parsedGames
+            .filter { key(it.gamePath) !in seenGameKeys }
+            .groupBy { key(it.gamePath) }
+            .map { (_, games) ->
+                val first = games.first()
                 JoiPlayUnusedFolderEntry(
-                    name = it.path.substringAfterLast('/'),
-                    path = it.path,
-                    parentPath = it.parentPath,
-                    title = it.title,
+                    name = first.gamePath.substringAfterLast('/'),
+                    path = first.gamePath,
+                    parentPath = first.gamePath.substringBeforeLast('/', missingDelimiterValue = rootPath),
+                    title = games.mapNotNull { it.title }.distinct().joinToString(", ").ifBlank { null },
                 )
             }
             .sortedWith(compareBy<JoiPlayUnusedFolderEntry> { it.parentPath.lowercase() }.thenBy { it.name.lowercase() })
@@ -207,35 +202,27 @@ object JoiPlayUnusedFolderReporter {
             rootPath = rootPath,
             backupGameCount = backupGames.size,
             backupGamesUnderRoot = parsedGames.size,
-            scannedParentPaths = parents,
-            inUseFolders = inUse,
-            probablyUnusedFolders = unused,
+            scannedParentPaths = scannedContainers,
+            inUseFolders = inUse.sortedWith(sortEntries),
+            probablyUnusedFolders = unused.sortedWith(sortEntries),
             missingReferencedFolders = missing,
             inaccessibleParentPaths = inaccessible,
         ).also { report ->
             AppLog.i(
                 "JoiPlayUnused",
                 "Scan done in=${report.inUseFolders.size} out=${report.probablyUnusedFolders.size} " +
-                    "missing=${report.missingReferencedFolders.size} inaccessible=${report.inaccessibleParentPaths.size}"
+                    "missing=${report.missingReferencedFolders.size} inaccessible=${report.inaccessibleParentPaths.size} " +
+                    "scanned=${report.scannedParentPaths.size}"
             )
         }
     }
 
+    private val sortEntries =
+        compareBy<JoiPlayUnusedFolderEntry> { it.parentPath.lowercase() }.thenBy { it.name.lowercase() }
+
     private data class ParsedBackupGame(
         val title: String?,
         val gamePath: String,
-    )
-
-    private data class BackupFolder(
-        val title: String?,
-        val path: String,
-        val parentPath: String,
-        val gamePath: String,
-    )
-
-    private data class BackupFolderCandidate(
-        val path: String,
-        val parentPath: String,
     )
 
     private fun effectiveGameFolder(path: String): String {
@@ -250,31 +237,6 @@ object JoiPlayUnusedFolderReporter {
     private fun isUnderRoot(path: String, rootPath: String): Boolean {
         val cleanRoot = rootPath.trimEnd('/')
         return path == cleanRoot || path.startsWith("$cleanRoot/")
-    }
-
-    private fun candidateFolders(path: String, rootPath: String): List<BackupFolderCandidate> {
-        val cleanRoot = rootPath.trimEnd('/')
-        val rel = path.removePrefix(cleanRoot).trim('/')
-        if (rel.isBlank()) return emptyList()
-        val segments = rel.split('/').filter { it.isNotBlank() }
-        if (segments.isEmpty()) return emptyList()
-        if (segments.size == 1) {
-            return listOf(BackupFolderCandidate(path = "$cleanRoot/${segments[0]}", parentPath = cleanRoot))
-        }
-        return (1 until segments.size).map { parentSegmentCount ->
-            val parentRel = segments.take(parentSegmentCount).joinToString("/")
-            val childRel = segments.take(parentSegmentCount + 1).joinToString("/")
-            BackupFolderCandidate(
-                path = "$cleanRoot/$childRel",
-                parentPath = "$cleanRoot/$parentRel",
-            )
-        }
-    }
-
-    private fun pathDepth(path: String, rootPath: String): Int {
-        val rel = path.removePrefix(rootPath.trimEnd('/')).trim('/')
-        if (rel.isBlank()) return 0
-        return rel.count { it == '/' } + 1
     }
 
     private fun normalizeExisting(file: File): String =
