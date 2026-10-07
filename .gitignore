@@ -1,0 +1,39 @@
+.gradle/
+build/
+app/build/
+app/.cxx/
+
+# Private AGM session/infra material. Never commit this.
+.agm-private/
+.github/skills/
+AGM_MATCHING_IMPLEMENTATION_PLAN.md
+
+# Local release signing material. Never commit these.
+keystore.properties
+signing.properties
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Local environment and secret-bearing configuration.
+.env
+.env.*
+!.env.example
+secrets.properties
+local.properties
+
+# Local/private runtime config and generated artifacts.
+app_config.json
+agm-menu-current.json
+agm-menu-tree.html
+*.log
+*.apk
+*.apks
+*.aab
+
+# IDE/local files.
+.idea/
+*.iml
