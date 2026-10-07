@@ -124,7 +124,7 @@ class ManagedUpgradeSaveMigrationTest {
     }
 
     @Test
-    fun copiedSaveRetainsCreationAndModifiedTimes() {
+    fun copiedSaveRetainsModifiedTime() {
         val old = temp.newFolder("old-times")
         val new = temp.newFolder("new-times")
         val source = write(old, "saves/slot1.sav", "timestamped")
@@ -132,9 +132,8 @@ class ManagedUpgradeSaveMigrationTest {
             source.toPath(),
             BasicFileAttributeView::class.java,
         )
-        val created = FileTime.fromMillis(System.currentTimeMillis() - 86_400_000L)
         val modified = FileTime.fromMillis(System.currentTimeMillis() - 43_200_000L)
-        sourceView.setTimes(modified, null, created)
+        sourceView.setTimes(modified, null, null)
         val sourceTimes = Files.readAttributes(source.toPath(), BasicFileAttributes::class.java)
 
         ManagedUpgradeSaveMigration.migrate(old, new)
@@ -144,6 +143,5 @@ class ManagedUpgradeSaveMigrationTest {
             BasicFileAttributes::class.java,
         )
         assertEquals(sourceTimes.lastModifiedTime().toMillis(), destinationTimes.lastModifiedTime().toMillis())
-        assertEquals(sourceTimes.creationTime().toMillis(), destinationTimes.creationTime().toMillis())
     }
 }

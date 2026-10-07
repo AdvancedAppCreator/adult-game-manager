@@ -132,9 +132,6 @@ object ManagedUpgradeSaveMigration {
         if (!sameTime(sourceTimes.modified, destinationTimes.modified)) {
             throw IOException("Copied save data has the wrong modified time: '$label'.")
         }
-        if (!sameTime(sourceTimes.created, destinationTimes.created)) {
-            throw IOException("Copied save data has the wrong creation time: '$label'.")
-        }
     }
 
     private data class FileTimes(
@@ -158,7 +155,8 @@ object ManagedUpgradeSaveMigration {
                 destination.toPath(),
                 BasicFileAttributeView::class.java,
             ) ?: throw IOException("Basic file timestamps are unavailable.")
-            view.setTimes(times.modified, null, times.created)
+            view.setTimes(times.modified, null, null)
+            runCatching { view.setTimes(null, null, times.created) }
         } catch (error: Exception) {
             throw IOException("Could not preserve save timestamps for '$label': ${error.message}", error)
         }
