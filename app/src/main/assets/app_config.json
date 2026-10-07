@@ -1,0 +1,21 @@
+{
+  "catalogUrl": "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/catalog.json.gz",
+  "catalogIndexUrl": "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/catalogs-index-v2.json",
+  "labelsUrl": "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/catalog/labels-v2.json",
+  "groupCardsUrl": "",
+  "canonicalTagsUrl": "",
+  "searchDbUrl": "",
+  "versionInfoUrl": "https://github.com/AdvancedAppCreator/adult-game-manager-releases/releases/download/app/version.json",
+  "versionInfoUrls": [],
+  "apkUrlOverride": null,
+  "crashUploadBaseUrl": null,
+  "crashUploadAuthQuery": null,
+  "supportThreadUrl": "https://f95zone.to/threads/300548/",
+  "issueReportUrl": "https://github.com/AdvancedAppCreator/adult-game-manager/issues",
+  "contactEmail": "advancedappcreator@proton.me",
+  "donationUrl": "https://buymeacoffee.com/advancedappcreator",
+  "stripeDonationUrl": "https://buy.stripe.com/14A7sM5zQgL0eGkbz02ZO00",
+  "diagnosticsEnabled": false,
+  "joiPlayDownloadsUrl": "https://joiplay.net/assets/json/downloads.json",
+  "browserPopupAllowlist": []
+}

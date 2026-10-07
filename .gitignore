@@ -27,6 +27,7 @@ local.properties
 
 # Local/private runtime config and generated artifacts.
 app_config.json
+!app/src/main/assets/app_config.json
 agm-menu-current.json
 agm-menu-tree.html
 *.log
