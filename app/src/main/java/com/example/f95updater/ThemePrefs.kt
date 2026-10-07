@@ -1,6 +1,9 @@
 package com.example.f95updater
 
 import android.content.Context
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -22,6 +25,27 @@ enum class AppThemeMode(val label: String) {
     System("System"),
     Light("Light"),
     Dark("Dark"),
+    Oled("OLED black"),
+}
+
+internal fun appColorScheme(mode: AppThemeMode, systemDark: Boolean): ColorScheme = when (mode) {
+    AppThemeMode.System -> if (systemDark) darkColorScheme() else lightColorScheme()
+    AppThemeMode.Light -> lightColorScheme()
+    AppThemeMode.Dark -> darkColorScheme()
+    AppThemeMode.Oled -> darkColorScheme().copy(
+        background = Color.Black,
+        surface = Color.Black,
+        surfaceDim = Color.Black,
+        surfaceBright = Color.Black,
+        surfaceContainerLowest = Color.Black,
+        surfaceContainerLow = Color.Black,
+        surfaceContainer = Color.Black,
+        surfaceContainerHigh = Color.Black,
+        surfaceContainerHighest = Color.Black,
+        surfaceVariant = Color.Black,
+        surfaceTint = Color.Transparent,
+        scrim = Color.Black,
+    )
 }
 
 data class CardColorSettings(

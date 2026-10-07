@@ -8,6 +8,7 @@ Adult Game Manager is a local-first Android companion app for tracking installed
 - Runs managed games through enabled JoiPlay, Winlator, and Kirikiroid engines without using their libraries as AGM's source of truth.
 - Matches local games to public catalog entries.
 - Tracks known version/update status.
+- Offers system, light, standard dark, and true-black OLED themes.
 - Analyzes supported Unity 2019–2022 LTS texture metadata without reading streamed payloads or modifying game files, and can configure Winlator's container-private texture-limit overlay when advertised.
 - Provides local Ren'Py and RPGM save discovery/editing helpers with backups.
 - Provides local install/extract helpers for files the user already has.

@@ -99,15 +99,10 @@ class MainActivity : ComponentActivity() {
             val cardColors by CardColorPrefs.observe(applicationContext)
                 .collectAsState(initial = CardColorSettings())
             val systemDark = isSystemInDarkTheme()
-            val dark = when (themeMode) {
-                AppThemeMode.System -> systemDark
-                AppThemeMode.Light -> false
-                AppThemeMode.Dark -> true
-            }
             androidx.compose.runtime.CompositionLocalProvider(
                 LocalCardColorSettings provides cardColors,
             ) {
-                MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+                MaterialTheme(colorScheme = appColorScheme(themeMode, systemDark)) {
                     Surface(modifier = Modifier.fillMaxSize()) { AppRoot() }
                 }
             }
