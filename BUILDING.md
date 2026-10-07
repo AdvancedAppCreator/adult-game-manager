@@ -59,3 +59,11 @@ native, test, and variant-specific graphs; incomplete generated metadata would
 give a misleading assurance or break valid variants. Add those controls only
 as a separately reviewed change that resolves and validates every supported
 CI/build configuration.
+
+## Public application configuration
+
+`app/src/main/assets/app_config.json` is the public baseline configuration
+packaged in the APK. It contains public catalog/update endpoints, support
+contact, and donation destinations. User-imported `app_config.json` fields
+override this baseline. Keep credentials, SAS tokens, and private diagnostics
+endpoints out of the bundled file.

@@ -548,6 +548,7 @@ internal fun InstalledHelpSubmenu(
     onToggle: () -> Unit,
     hasBmc: Boolean,
     hasStripe: Boolean,
+    hasContact: Boolean,
     hasCrashUpload: Boolean,
     diagnosticsEnabled: Boolean,
     matchResearchInProgress: Boolean,
@@ -628,9 +629,9 @@ internal fun InstalledHelpSubmenu(
                             onClick = onUploadAppLogs
                         )
                     }
-                    if (hasBmc || hasStripe) {
+                    if (hasBmc || hasStripe || hasContact) {
                         DropdownMenuItem(
-                            text = { Text(if (hasBmc && hasStripe) "Support the project" else "Support link") },
+                            text = { Text("Support the project") },
                             leadingIcon = { Text("\u2615", fontSize = 18.sp) },
                             onClick = onSupport
                         )

@@ -5452,7 +5452,11 @@ fun InstalledScreen(
                 st.screenshotPanel = ScreenshotPanel.About
                 snap("08-about-dialog")
 
-                if (appConfig.donationUrl.isNotBlank() || appConfig.stripeDonationUrl.isNotBlank()) {
+                if (
+                    appConfig.donationUrl.isNotBlank() ||
+                    appConfig.stripeDonationUrl.isNotBlank() ||
+                    appConfig.contactEmail.isNotBlank()
+                ) {
                     st.screenshotPanel = ScreenshotPanel.Support
                     snap("09-support-dialog")
                 }
@@ -5704,6 +5708,9 @@ fun InstalledScreen(
     val availableUserTags = remember(st.userTags) {
         st.userTags.values.flatten().distinct().sorted()
     }
+    val hasBmc = appConfig.donationUrl.isNotBlank()
+    val hasStripe = appConfig.stripeDonationUrl.isNotBlank()
+    val hasContact = appConfig.contactEmail.isNotBlank()
 
     Scaffold(
         topBar = {
@@ -5719,11 +5726,9 @@ fun InstalledScreen(
                 },
                 actions = {
                     // Donate (☕) — shown if any donation URL is configured.
-                    val hasBmc = appConfig.donationUrl.isNotBlank()
-                    val hasStripe = appConfig.stripeDonationUrl.isNotBlank()
-                    if (!compactWidth && !compactHeight && (hasBmc || hasStripe)) {
+                    if (!compactWidth && !compactHeight && (hasBmc || hasStripe || hasContact)) {
                         IconButton(onClick = {
-                            if (hasBmc && hasStripe) {
+                            if (hasContact || (hasBmc && hasStripe)) {
                                 st.supportDialogOpen = true
                             } else {
                                 val url = if (hasStripe) appConfig.stripeDonationUrl else appConfig.donationUrl
@@ -6029,13 +6034,13 @@ fun InstalledScreen(
 
                             HorizontalDivider()
 
-                            if (hasBmc || hasStripe) {
+                            if (hasBmc || hasStripe || hasContact) {
                                 DropdownMenuItem(
                                     text = { Text("Support / donate") },
                                     leadingIcon = { Text("\u2615", fontSize = 20.sp) },
                                     onClick = {
                                         st.menuOpen = false
-                                        if (hasBmc && hasStripe) {
+                                        if (hasContact || (hasBmc && hasStripe)) {
                                             st.supportDialogOpen = true
                                         } else {
                                             val url = if (hasStripe) appConfig.stripeDonationUrl else appConfig.donationUrl
@@ -6053,6 +6058,7 @@ fun InstalledScreen(
                                 onToggle = { st.subLogsOpen = !st.subLogsOpen },
                                 hasBmc = hasBmc,
                                 hasStripe = hasStripe,
+                                hasContact = hasContact,
                                 hasCrashUpload = appConfig.hasCrashUpload,
                                 diagnosticsEnabled = appConfig.diagnosticsEnabled,
                                 matchResearchInProgress = st.matchResearchProgress != null,
@@ -6106,7 +6112,7 @@ fun InstalledScreen(
                                 },
                                 onSupport = {
                                     st.menuOpen = false; st.subLogsOpen = false
-                                    if (hasBmc && hasStripe) {
+                                    if (hasContact || (hasBmc && hasStripe)) {
                                         st.supportDialogOpen = true
                                     } else {
                                         val url = if (hasStripe) appConfig.stripeDonationUrl else appConfig.donationUrl
@@ -10610,57 +10616,104 @@ fun InstalledScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Thanks for considering a tip! Choose whichever option is easier for you — both go to the same developer.",
+                        "Thanks for supporting the project. Choose a donation option or contact the developer directly.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(4.dp))
-                    Surface(
-                        tonalElevation = 1.dp,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            st.supportDialogOpen = false
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(appConfig.stripeDonationUrl)))
-                            }.onFailure { st.snackbarMsg = "Could not open browser: ${it.message}" }
-                        },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                    if (hasStripe) {
+                        Surface(
+                            tonalElevation = 1.dp,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                st.supportDialogOpen = false
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(appConfig.stripeDonationUrl)),
+                                    )
+                                }.onFailure { st.snackbarMsg = "Could not open browser: ${it.message}" }
+                            },
                         ) {
-                            Text("\uD83D\uDCB3", fontSize = 22.sp)
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text("Credit card / Apple Pay / Google Pay",
-                                     fontWeight = FontWeight.SemiBold)
-                                Text("Direct card / wallet link",
-                                     style = MaterialTheme.typography.bodySmall,
-                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("\uD83D\uDCB3", fontSize = 22.sp)
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        "Credit card / Apple Pay / Google Pay",
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Text(
+                                        "Direct card / wallet link",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }
-                    Surface(
-                        tonalElevation = 1.dp,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth().clickable {
-                            st.supportDialogOpen = false
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(appConfig.donationUrl)))
-                            }.onFailure { st.snackbarMsg = "Could not open browser: ${it.message}" }
-                        },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                    if (hasBmc) {
+                        Surface(
+                            tonalElevation = 1.dp,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                st.supportDialogOpen = false
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(appConfig.donationUrl)),
+                                    )
+                                }.onFailure { st.snackbarMsg = "Could not open browser: ${it.message}" }
+                            },
                         ) {
-                            Text("\u2615", fontSize = 22.sp)
-                            Spacer(Modifier.width(12.dp))
-                            Column {
-                                Text("Support link", fontWeight = FontWeight.SemiBold)
-                                Text("Optional external support page",
-                                     style = MaterialTheme.typography.bodySmall,
-                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("\u2615", fontSize = 22.sp)
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text("Support link", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "Optional external support page",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (hasContact) {
+                        Surface(
+                            tonalElevation = 1.dp,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                st.supportDialogOpen = false
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(
+                                            Intent.ACTION_SENDTO,
+                                            Uri.fromParts("mailto", appConfig.contactEmail, null),
+                                        ),
+                                    )
+                                }.onFailure { st.snackbarMsg = "Could not open email app: ${it.message}" }
+                            },
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("\u2709", fontSize = 22.sp)
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text("Email", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        appConfig.contactEmail,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }

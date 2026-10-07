@@ -14,6 +14,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import java.io.File
 
 /**
@@ -21,16 +23,16 @@ import java.io.File
  * services (catalog, self-update, optional crash/log upload).
  *
  * Resolution order:
- *   1. <files>/app_config.json  (user-imported config — overrides everything)
- *   2. Compiled defaults  (whatever was baked into this build of the APK)
+ *   1. <files>/app_config.json  (user-imported fields override the public baseline)
+ *   2. assets/app_config.json  (public baseline configuration)
+ *   3. Compiled defaults  (fallback if the bundled JSON cannot be parsed)
  *
  * The public release ships with defaults that point at the public asset host (e.g. GitHub
  * Releases) and crashUploadUrl = null, which disables the crash/log upload UI.
  *
- * Personal/developer builds can either be compiled with a different default, or — more
- * conveniently — install the public APK and then drop their own app_config.json via the
+ * Personal/developer builds can install the public APK and then drop their own app_config.json via the
  * "Import config" menu item. The Import action reads the picked file and copies it into
- * <files>/app_config.json where it overrides defaults from then on.
+ * <files>/app_config.json where its fields override the bundled baseline from then on.
  */
 @Serializable
 data class AppConfig(
@@ -64,6 +66,8 @@ data class AppConfig(
     val supportThreadUrl: String = DEFAULT_SUPPORT_URL,
     /** URL for bug reports and feature requests. */
     val issueReportUrl: String = DEFAULT_ISSUES_URL,
+    /** Public support/contact email. Blank hides email actions. */
+    val contactEmail: String = DEFAULT_CONTACT_EMAIL,
     /** Optional donation URL (Buy Me a Coffee, Ko-fi, etc.). If blank, donate button is hidden. */
     val donationUrl: String = DEFAULT_DONATION_URL,
     /** Stripe Payment Link for direct card / wallet donations. Optional. If both this
@@ -135,6 +139,7 @@ data class AppConfig(
             "https://advancedappcreator.github.io/adult-game-manager-releases/"
         const val DEFAULT_ISSUES_URL =
             "https://github.com/AdvancedAppCreator/adult-game-manager-releases/issues"
+        const val DEFAULT_CONTACT_EMAIL = ""
         const val DEFAULT_DONATION_URL = ""
         const val DEFAULT_STRIPE_DONATION_URL = ""
         const val DEFAULT_JOIPLAY_DOWNLOADS_URL =
@@ -200,6 +205,18 @@ object AppConfigStore {
 
     private fun privateFile(context: Context): File = File(context.filesDir, FILE_NAME)
 
+    internal fun decodeConfig(text: String, baseline: AppConfig = AppConfig()): AppConfig {
+        val base = json.encodeToJsonElement(AppConfig.serializer(), baseline).jsonObject
+        val override = json.parseToJsonElement(text).jsonObject
+        return json.decodeFromJsonElement(AppConfig.serializer(), JsonObject(base + override))
+    }
+
+    private fun bundledConfig(context: Context): AppConfig = runCatching {
+        context.assets.open(FILE_NAME).bufferedReader().use { decodeConfig(it.readText()) }
+    }.onFailure {
+        AppLog.w("AppConfig", "Failed to parse bundled $FILE_NAME - using compiled defaults", it)
+    }.getOrElse { AppConfig() }
+
     /**
      * Returns the current effective config. On first call, performs the synchronous
      * load (drop-in scan, then private file). Subsequent calls return the cached
@@ -241,6 +258,7 @@ object AppConfigStore {
     }
 
     private fun loadFromDisk(context: Context): AppConfig {
+        val baseline = bundledConfig(context)
         val priv = privateFile(context)
         // 1. Try drop-in first
         runCatching {
@@ -251,7 +269,7 @@ object AppConfigStore {
                 val text = dropIn.readText()
                 val privateText = if (priv.exists()) runCatching { priv.readText() }.getOrNull() else null
                 if (!priv.exists() || dropMtime > privMtime || text != privateText) {
-                    val parsed = json.decodeFromString(AppConfig.serializer(), text)
+                    val parsed = decodeConfig(text, baseline)
                     logConfigSummary("Parsed drop-in", parsed)
                     priv.writeText(text)
                     runCatching { priv.setLastModified(dropMtime) }
@@ -262,13 +280,13 @@ object AppConfigStore {
 
         // 2. Private override
         if (priv.exists()) {
-            val loaded = runCatching { json.decodeFromString(AppConfig.serializer(), priv.readText()) }
+            val loaded = runCatching { decodeConfig(priv.readText(), baseline) }
                 .onSuccess { logConfigSummary("Loaded private", it) }
                 .onFailure { AppLog.w("AppConfig", "Failed to parse private $FILE_NAME - using defaults", it) }
                 .getOrNull()
-            return loaded ?: AppConfig().also { logConfigSummary("Loaded defaults after private parse failure", it) }
+            return loaded ?: baseline.also { logConfigSummary("Loaded bundled config after private parse failure", it) }
         }
-        return AppConfig().also { logConfigSummary("Loaded defaults", it) }
+        return baseline.also { logConfigSummary("Loaded bundled config", it) }
     }
 
     private fun logConfigSummary(source: String, config: AppConfig) {
@@ -441,7 +459,7 @@ object AppConfigStore {
     /** Delete the private override, restoring compiled defaults. UI updates immediately. */
     suspend fun clearPrivate(context: Context) = withContext(Dispatchers.IO) {
         runCatching { privateFile(context).delete() }
-        _flow.value = AppConfig()
+        _flow.value = bundledConfig(context)
         initialized = true
     }
 

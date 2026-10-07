@@ -44,8 +44,8 @@ android {
         minSdk = 26
         targetSdk = 34
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 258
-        versionName = "2.10.40"
+        versionCode = 259
+        versionName = "2.10.41"
         ndk {
             // Single-ABI build keeps APK growth ~600 KB. Add armeabi-v7a / x86_64
             // later if anyone runs into "unrar lib unavailable" on older hardware

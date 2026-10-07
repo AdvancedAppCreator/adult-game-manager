@@ -59,6 +59,10 @@ configuration enables it. Custom migration and Kirikiroid launch permissions
 declared by the app are integration contracts with companion apps; they do not
 grant Android platform storage, package, or network privileges.
 
+Support email and donation links open only after the user selects them. They
+are public destinations from the bundled `app_config.json`; AGM does not send
+contact details or payment information itself.
+
 ## No game-downloader behavior
 
 Adult Game Manager does not bypass file hosts, scrape private download links, or automatically download games. It is a local tracker and local file/save helper.
