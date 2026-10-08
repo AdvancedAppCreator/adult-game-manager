@@ -2,6 +2,15 @@
 
 Adult Game Manager is a local-first Android companion app for tracking installed APK games, AGM-managed extracted games, and public catalog updates.
 
+[Download the latest signed APK](https://github.com/AdvancedAppCreator/adult-game-manager/releases/latest)
+| [Read the help site](https://advancedappcreator.github.io/adult-game-manager-releases/)
+| [Install with Obtainium](https://advancedappcreator.github.io/adult-game-manager-releases/install-obtainium/)
+| [Get support](https://github.com/AdvancedAppCreator/adult-game-manager-releases/issues)
+
+AGM is designed for people who keep Android games, JoiPlay-compatible
+Ren'Py/RPG Maker games, Windows games for Winlator, or KiriKiri games on the
+same device and want one searchable library instead of separate manual lists.
+
 ## What it does
 
 - Lists locally installed Android apps and AGM-managed extracted games.
@@ -25,6 +34,39 @@ Adult Game Manager is a local-first Android companion app for tracking installed
   and does not survive the app being killed.
 
 Adult Game Manager does not require an F95 login, does not download games automatically, does not bypass file hosts, and does not include analytics.
+
+## Launcher ecosystem
+
+AGM remains the source of truth for its managed library while compatible
+runtime apps execute games:
+
+- [JoiPlay](https://joiplay.org/) for supported Ren'Py, RPG Maker, HTML, and
+  related games.
+- [Winlator Secure](https://github.com/AdvancedAppCreator/winlator-app), an
+  unofficial community fork for supported Windows games and AGM integration.
+- [Kirikiroid2 Community Fork](https://github.com/AdvancedAppCreator/kirikiroid2)
+  for supported KiriKiri/Kirikiri Z games and AGM integration.
+
+See the [launcher setup guide](https://advancedappcreator.github.io/adult-game-manager-releases/launcher-setup/)
+for project boundaries and setup order.
+
+## Why use AGM?
+
+| Without a shared manager | With AGM |
+| --- | --- |
+| Check Android and each launcher separately | Search one local library |
+| Revisit source pages to compare versions | Compare matched games with public catalog metadata |
+| Remember which runtime owns each game | Launch compatible games from their AGM entry |
+| Replace archives manually | Review a planned multi-file install or upgrade |
+| Find engine-specific saves by hand | Use supported backup-aware Ren'Py and RPG Maker tools |
+
+See the complete [feature comparison](https://advancedappcreator.github.io/adult-game-manager-releases/why-agm/).
+
+## Screenshots
+
+| Library | Catalog | Main menu |
+| --- | --- | --- |
+| ![AGM library](https://raw.githubusercontent.com/AdvancedAppCreator/adult-game-manager-releases/main/docs/screenshots/main-screen.png) | ![AGM catalog](https://raw.githubusercontent.com/AdvancedAppCreator/adult-game-manager-releases/main/docs/screenshots/catalog-main.png) | ![AGM main menu](https://raw.githubusercontent.com/AdvancedAppCreator/adult-game-manager-releases/main/docs/screenshots/main-menu.png) |
 
 ## Build
 
